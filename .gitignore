@@ -1,0 +1,18 @@
+# Secrets
+anthropic_key.txt
+**/anthropic_key.txt
+
+# Generated each run
+gui/Gui_3_0/logs/ai_debug_log.txt
+*.log
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Per-arm firmware settings (reversed motor IDs etc.)
+firmware/lineform-ai/local_config.h
+
+# Per-arm GUI settings (motor count etc.)
+gui/Gui_3_0/local_config.json
