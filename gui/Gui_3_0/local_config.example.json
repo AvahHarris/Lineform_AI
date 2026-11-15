@@ -3,5 +3,7 @@
   "active_motors": 11,
   "base_block_first": true,
   "hand_move_threshold_deg": 5,
-  "hand_move_confirm_readings": 1
+  "hand_move_confirm_readings": 1,
+  "overload_trip_pct": 95,
+  "overload_confirm_readings": 2
 }

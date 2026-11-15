@@ -93,6 +93,8 @@ void loadLocalConfig() {
     if (c.hasKey("base_block_first")) BASE_BLOCK_FIRST = c.getBoolean("base_block_first");
     if (c.hasKey("hand_move_threshold_deg")) LIVE_FOLLOW_DEG = max(1, c.getFloat("hand_move_threshold_deg"));
     if (c.hasKey("hand_move_confirm_readings")) LIVE_FOLLOW_CONFIRM = max(1, c.getInt("hand_move_confirm_readings"));
+    if (c.hasKey("overload_trip_pct")) OVERLOAD_TRIP_PCT = constrain(c.getFloat("overload_trip_pct"), 10, 150);
+    if (c.hasKey("overload_confirm_readings")) OVERLOAD_CONFIRM_READINGS = max(1, c.getInt("overload_confirm_readings"));
     println("local_config.json: " + ACTIVE_MOTORS + " active motors, base block "
       + (BASE_BLOCK_FIRST ? "before motor 1" : "after the last motor")
       + ", hand move > " + LIVE_FOLLOW_DEG + " deg for " + LIVE_FOLLOW_CONFIRM + " reading(s)");
@@ -107,9 +109,11 @@ boolean rowActive(int rowId) {
   return i >= 0 && i < ACTIVE_MOTORS;
 }
 
+// Every serial command goes through here. One call may hold several
+// commands back to back (e.g. a 254 for every motor); they are split,
+// framed with a checksum and paced by the Arduino's ACKs - see SerialLink.pde.
 synchronized void sendSerialBytes(int... bytes) {
-  if (!serialConnected()) return;
-  for (int b : bytes) myPort.write(b);
+  serialLinkSend(bytes);
 }
 
 // ---- Release the motors when the GUI closes ----
@@ -970,7 +974,7 @@ void draw() {
   // Don't let dragging inside the GUI panel (sliders, buttons, prompt box)
   // also orbit the camera - PeasyCam only knows about raw mouse events, not
   // that ControlP5 controls are logically "on top" of the 3D scene.
-  cam.setActive(!cp5.isMouseOver() && !chatMouseOver());
+  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver());
 
   // Read the "Show Hinges" switch straight off its control each frame -
   // same pattern as the torque toggles below, no controlEvent() wiring
@@ -1019,6 +1023,12 @@ void draw() {
   for (int i = 0; i < allToggles.length; i++) {
     int rowY = ROW_START_Y + i * ROW_STEP;
     int labelY = rowY + TOGGLE_H / 2;
+    if (manipulationMode) {
+      // switches are hidden: one label per row instead
+      fill(rowActive(i + 2) ? MANIP_ACCENT : THEME_MUTED);
+      hudText(rowActive(i + 2) ? "FREE - torque OFF" : "not fitted", TOGGLE_X, labelY);
+      continue;
+    }
     boolean angle = allToggles[i].getBooleanValue();
     fill(angle ? THEME_CYAN : THEME_ORANGE);
     hudText(angle ? "ANGLE" : "TORQUE", toggleLabelX, labelY);
@@ -1028,6 +1038,8 @@ void draw() {
   }
 
   drawChatPanel();
+  drawManipulationHint();  // where Create Shape / Reset sit, in manipulation mode
+  drawModeSwitchPanel();   // AI / manipulation switch backing + labels (+ banner)
 
   // ControlP5 controls are already positioned in physical pixel coordinates.
   cp5.draw();
@@ -1048,7 +1060,8 @@ void draw() {
 // The actual hit-test happens inside drawlineform3d(), not here - see the
 // comment on hingeClickPending above for why.
 void mousePressed() {
-  if (!cp5.isMouseOver() && !chatMouseOver()) {
+  if (modesMousePressed()) return; // AI / manipulation switch (Modes.pde)
+  if (!cp5.isMouseOver() && !chatMouseOver() && !manipulationMode) { // no stiffness taps while limp
     hingeClickPending = true;
     hingeClickX = mouseX;
     hingeClickY = mouseY;
@@ -1094,6 +1107,7 @@ void keyPressed() {
 synchronized float readMotorPosition(int dxlId, float fallbackDegrees) {
   // Offline: the slider is the simulated joint position.
   if (!serialConnected() || !rowActive(dxlId)) return fallbackDegrees;
+  serialDrainStale(); // the next 2 bytes must be THIS reply (SerialLink.pde)
   sendSerialBytes(253, hwId(dxlId));
 
   long startTime = millis();
@@ -1122,6 +1136,7 @@ synchronized float readMotorPosition(int dxlId, float fallbackDegrees) {
 // torque stays on throughout a run.
 synchronized void aiSendSlidersOverSerial() {
   if (!serialConnected()) return; // slider values still update the 3D simulation
+  if (manipulationMode) return;   // motors are limp on purpose
 
   // Bytes go in chain order (first active joint to last) - the Arduino maps
   // position i to DXL_IDS[i]. Each motor gets its TARGET (a pending bar value,
@@ -1143,6 +1158,9 @@ void controlEvent(ControlEvent theEvent) {
 
   String name = theEvent.getName();
 
+  // Create Shape / Reset would move the motors - not while they are limp.
+  if (manipulationMode && (name.equals("Create Shape") || name.equals("Reset"))) return;
+
   // Shape Chat panel (Send button, Enter in the chat box, New Chat).
   if (chatHandleControlEvent(name)) return;
   // Motor rows: ANGLE/TORQUE switches, torque sliders, live angle drags.
@@ -1158,6 +1176,15 @@ void controlEvent(ControlEvent theEvent) {
   // shape_library.json. Name = whatever is typed in the chat box (without
   // sending it), otherwise the current shape's name.
   if (name.equals("Save Shape")) {
+    // Manipulation mode hides the chat box, so a hand-made pose gets a
+    // timestamped name instead (rename it in shape_library.json if needed).
+    if (manipulationMode) {
+      String poseName = "hand pose " + year() + nf(month(), 2) + nf(day(), 2) + "-" + nf(hour(), 2) + nf(minute(), 2) + nf(second(), 2);
+      saveShapeToLibrary(poseName);
+      chatAdd("status", "Saved the hand-made pose as \"" + poseName + "\".");
+      println("Saved the hand-made pose as \"" + poseName + "\".");
+      return;
+    }
     String rawName = (chatInput != null) ? chatInput.getText() : "";
     if (rawName == null || rawName.trim().length() == 0) {
       rawName = selectedShape.startsWith("ai: ") ? selectedShape.substring(4) : selectedShape;
@@ -1315,7 +1342,10 @@ if (name.equals("Reset")) {
     float[] neutral = new float[MOTOR_COUNT];
     for (int i = 0; i < MOTOR_COUNT; i++) neutral[i] = 180;
     motorsNoteSentAll(neutral);
-    thread("motorsStartupDiagnostics"); // print each motor's real state once things settle
+    // Check every motor, restart any that is shut down (lost torque, hardware
+    // error, not answering), report in the chat, then print diagnostics.
+    chatAdd("status", "Reset: checking all motors...");
+    thread("motorsResetCheck");
   }
 
 
@@ -2116,6 +2146,10 @@ ArrayList<String> aiAnimPoseNames = new ArrayList<String>();
 ArrayList<Float> aiAnimPoseFits = new ArrayList<Float>();
 
 void aiStartAnimation(AIAnimationResult result) {
+  if (manipulationMode) { // a reply that arrived after switching modes
+    chatAdd("status", "Animation not started - switch back to AI mode first.");
+    return;
+  }
   aiStopAnimation(); // never leave an old animation silently playing under a new one
   aiAnimName = result.animationName;
   aiAnimIsWave = result.isTravelingWave;

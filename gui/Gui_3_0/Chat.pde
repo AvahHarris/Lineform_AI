@@ -149,6 +149,7 @@ void chatSetCritic(boolean on) {
 }
 
 boolean chatMouseOver() {
+  if (manipulationMode) return false; // panel hidden - the camera can use that area
   return mouseX >= uiX(CHAT_X) && mouseX <= uiX(CHAT_X + CHAT_W)
       && mouseY >= uiY(CHAT_Y) && mouseY <= uiY(CHAT_Y + CHAT_H);
 }
@@ -223,6 +224,7 @@ color chatTagColor(String who) {
 }
 
 void drawChatPanel() {
+  if (manipulationMode) return; // hidden in manipulation mode (Modes.pde)
   pushStyle();
 
   // Panel background + header
@@ -392,6 +394,10 @@ void chatSubmit() {
   if (chatInput == null) return;
   String msg = chatInput.getText();
   if (msg == null || msg.trim().length() == 0) return;
+  if (manipulationMode) {
+    chatAdd("status", "Manipulation mode is on (motors OFF). Switch back to AI mode to ask for shapes or animations.");
+    return;
+  }
   if (chatBusy) {
     chatAdd("status", "Still working on your last message - one moment.");
     return;

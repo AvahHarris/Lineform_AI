@@ -77,6 +77,7 @@ boolean[] motorJumpSeen = new boolean[MOTOR_COUNT];
 final float MAX_READING_JUMP_DEG = 45;
 long motorActualMs = 0;
 volatile float[] motorLoadPct = null;      // live torque use per motor, % of its limit (null = not read yet)
+volatile int motorLoadSeq = 0;             // +1 per new load reading (overload check counts each reading once)
 volatile boolean motorsLiveSupported = true;
 int motorsReadFailures = 0;
 
@@ -110,7 +111,7 @@ void motorsSetup() {
 }
 
 boolean motorShowsAngle(int i) {
-  if (cp5 == null) return true;
+  if (cp5 == null || manipulationMode) return true; // manipulation: every row shows its angle
   Controller t = cp5.getController("View " + (i + 2));
   return t == null || ((Toggle) t).getState();
 }
@@ -155,6 +156,9 @@ void motorsResetMotor(int dxlId) {
 
 // Returns true if the event belonged to a motor row.
 boolean motorsHandleControlEvent(String name, float value) {
+  // Manipulation mode: these controls are hidden/locked - swallow any stray event.
+  if (manipulationMode && (name.startsWith("View ") || name.startsWith("Power ")
+      || name.startsWith("Torque Level ") || name.startsWith("Motor "))) return true;
   if (name.startsWith("View ")) {
     motorsApplyView(int(name.substring(5)));
     return true;
@@ -245,6 +249,15 @@ void motorsTick() {
     thread("motorsRunDiagnostics");
   }
 
+  // Overload protection: any motor at >= 95% torque -> manipulation mode (Modes.pde).
+  modesCheckOverload();
+
+  // Manipulation mode: motors limp, bars just follow the real angles (Modes.pde).
+  if (manipulationMode) {
+    modesManipulationTick(now);
+    return;
+  }
+
   boolean dragging = false;
   for (int i = 0; i < MOTOR_COUNT; i++) {
     Controller s = cp5.getController("Motor " + (i + 2));
@@ -304,7 +317,10 @@ void motorsTick() {
     float actual = r[i];
     boolean moving = abs(actual - motorPrevActual[i]) > 0.6;
     motorPrevActual[i] = actual;
-    if (!motorShowsAngle(i)) continue;
+    // Rows in TORQUE view are handled too: their (hidden) angle bar still
+    // tracks the real angle - the 3D view draws it - and hand-move HOLD must
+    // work whichever bar the row is showing. (Skipping them here is why a
+    // motor in TORQUE view never held a new hand-posed angle.)
     Controller s = cp5.getController("Motor " + (i + 2));
     if (s.isMousePressed() || motorDragPending[i]) continue; // you're dragging it
     if (motorSliderPending(i)) continue;   // holds a new angle waiting for Create Shape
@@ -356,21 +372,25 @@ void motorsTick() {
 }
 
 // Background thread: reads all 11 motor angles every LIVE_READ_INTERVAL_MS
-// while at least one motor shows ANGLE. Never touches the GUI itself.
+// (plus torque use while any row shows TORQUE). Never touches the GUI itself.
 void motorsLiveReaderLoop() {
   while (true) {
-    delay(LIVE_READ_INTERVAL_MS);
-    if (!serialConnected() || aiAnimating || motorsUserDragging) continue;
-    boolean anyAngle = false, anyTorque = false;
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-      if (motorShowsAngle(i)) anyAngle = true;
-      else anyTorque = true;
-    }
-    if (anyTorque) {
+    delay(manipulationMode ? MANIP_READ_INTERVAL_MS : LIVE_READ_INTERVAL_MS);
+    if (!serialConnected()) continue;
+    // Torque use is read EVERY cycle in AI mode - whatever bar each row shows,
+    // and also during animations and slider drags - because the overload
+    // protection (Modes.pde, modesCheckOverload) needs it. In manipulation
+    // mode the motors are limp, so there is nothing to protect.
+    if (!manipulationMode) {
       float[] loads = readAllMotorValues(READ_ALL_LOAD_HEADER, 10.0);
-      if (loads != null) motorLoadPct = loads;
+      if (loads != null) {
+        motorLoadPct = loads;
+        motorLoadSeq++;
+      }
     }
-    if (!anyAngle) continue;
+    if (aiAnimating || motorsUserDragging) continue;
+    // Angles are ALWAYS read (even if every row shows TORQUE): hand-move
+    // hold and the 3D view need them.
     float[] r = readAllMotorValues(READ_ALL_HEADER, 100.0);
     if (r == null) {
       // Missed replies happen while the Arduino is busy (e.g. Reset turning
@@ -402,6 +422,10 @@ void motorsLiveReaderLoop() {
 int motorsReadSeq = 0;
 
 synchronized float[] readAllMotorValues(int header, float scale) {
+  return readAllMotorValues(header, scale, 300);
+}
+
+synchronized float[] readAllMotorValues(int header, float scale, int timeoutMs) {
   if (!serialConnected()) return null;
   myPort.clear();
   motorsReadSeq = (motorsReadSeq + 1) % 200; // stays below every command byte (248-255)
@@ -414,7 +438,7 @@ synchronized float[] readAllMotorValues(int header, float scale) {
   ArrayList<Integer> bytes = new ArrayList<Integer>();
   int scanFrom = 0;
   long start = millis();
-  while (millis() - start < 300) {
+  while (millis() - start < timeoutMs) {
     while (myPort.available() > 0) {
       int b = myPort.read();
       if (b >= 0) bytes.add(b);
@@ -616,6 +640,85 @@ void motorsStartupDiagnostics() {
   motorsRunDiagnostics();
 }
 
+// ---- Reset: check every motor and restart any that is shut down ----
+// Runs in a background thread after Reset. Firmware command 240 checks each
+// motor (answering? hardware error? torque on?) and restarts any that isn't
+// running - rebooting it first if it's in an error state or not answering.
+// A restarted motor holds where it is, so afterwards the Reset targets are
+// sent again and it goes to the straight pose with the others. The result
+// goes to the chat and the console, followed by the usual diagnostics table.
+final int CHECK_RECOVER_HEADER = 240;
+
+void motorsResetCheck() {
+  delay(400); // let the Reset torque-on burst and neutral frame get processed first
+  if (!serialConnected() || manipulationMode) return;
+  float[] res = readAllMotorValues(CHECK_RECOVER_HEADER, 1.0, 6000); // reboots can take a few seconds
+  if (res == null) {
+    motorsPostToChat("error", "Motor check after Reset: no answer from the Arduino - upload the latest "
+      + "firmware/lineform-ai/lineform-ai.ino (needs command 240).", false);
+    delay(1500);
+    motorsRunDiagnostics();
+    return;
+  }
+
+  ArrayList<String> fixed = new ArrayList<String>();
+  ArrayList<String> failed = new ArrayList<String>();
+  int ok = 0, limp = 0;
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    int v = round(res[i]);
+    if (v < 0) continue; // not fitted
+    int code = v / 1000, err = v % 1000;
+    String m = "motor " + displayId(i + 2);
+    switch (code) {
+    case 0: ok++; break;
+    case 1: fixed.add(m + " (torque was OFF)"); break;
+    case 2: fixed.add(m + " (" + motorsHwErrorText(err) + " - rebooted)"); break;
+    case 3: fixed.add(m + " (wasn't answering - rebooted)"); break;
+    case 4: failed.add(m + " NOT ANSWERING - check its power and cable"); break;
+    case 5: failed.add(m + " restart FAILED" + (err != 0 ? " (" + motorsHwErrorText(err) + ")" : "")); break;
+    case 6: limp++; break;
+    default: failed.add(m + " unknown result " + v);
+    }
+  }
+
+  String msg;
+  String kind = "status";
+  if (fixed.isEmpty() && failed.isEmpty()) {
+    msg = "Motor check: all " + ok + " motors running" + (limp > 0 ? " (" + limp + " limp at 0% on purpose)" : "") + ".";
+  } else {
+    msg = "Motor check after Reset:";
+    if (!fixed.isEmpty()) msg += " restarted " + String.join(", ", fixed) + ".";
+    if (!failed.isEmpty()) { msg += " PROBLEM: " + String.join("; ", failed) + "."; kind = "error"; }
+    msg += " " + ok + " motor(s) were fine.";
+  }
+  println(msg);
+  motorsPostToChat(kind, msg, !fixed.isEmpty()); // re-send the Reset pose if anything was restarted
+  delay(1500);
+  motorsRunDiagnostics(); // console table, as before
+}
+
+// Hands a message (and optionally a re-send of the current targets) to the
+// drawing thread - chat and serial frames must not be touched from here.
+void motorsPostToChat(final String kind, final String msg, final boolean resendTargets) {
+  chatMainJobs.add(new Runnable() {
+    public void run() {
+      chatAdd(kind, msg);
+      if (resendTargets && !manipulationMode && !aiAnimating) aiSendSlidersOverSerial();
+    }
+  });
+}
+
+// Dynamixel X-series Hardware Error Status bits.
+String motorsHwErrorText(int err) {
+  ArrayList<String> s = new ArrayList<String>();
+  if ((err & 0x01) != 0) s.add("input voltage");
+  if ((err & 0x04) != 0) s.add("overheating");
+  if ((err & 0x08) != 0) s.add("encoder");
+  if ((err & 0x10) != 0) s.add("electrical shock");
+  if ((err & 0x20) != 0) s.add("overload");
+  return s.isEmpty() ? ("error " + err) : (String.join(" + ", s) + " error");
+}
+
 // Latest read-back per motor (shown on the TORQUE bars): -1 = unknown.
 float[] motorDiagPwmPct = null;   // goal PWM as % of PWM limit
 float[] motorDiagLast = null;     // firmware's record: last % received*100 + pwmOk*10 + curOk
@@ -643,8 +746,9 @@ void motorsRunDiagnostics() {
     float[] c = motorDiagCounts;
     println("FIRMWARE: up " + round(c[0]) + " s | received: 255 frame x" + round(c[1]) + ", 254 on/off x" + round(c[2])
       + ", 251 torque x" + round(c[3]) + ", 249 goal x" + round(c[4]) + ", 250 read x" + round(c[5])
-      + ", 252 stiff x" + round(c[6]) + ", 253 read1 x" + round(c[7]) + " | timeouts " + round(c[8])
-      + " | unknown bytes " + round(c[9]) + " | GUI sent 251 x" + motorsTorqueSentCount
+      + ", 252 stiff x" + round(c[6]) + ", 253 read1 x" + round(c[7]) + " | DROPPED (damaged) " + round(c[8])
+      + " | stray bytes " + round(c[9]) + " | GUI: NAK x" + serialNakCount + ", ACK timeouts x" + serialAckTimeouts
+      + " | GUI sent 251 x" + motorsTorqueSentCount
       + " | last 251: " + motorsLastTlText());
   }
   println("DIAGNOSTICS (firmware answered):");

@@ -31,6 +31,14 @@ const byte STATUS_CUR_HEADER    = 245; // + seq                   -> framed repl
 const byte STATUS_LAST_HEADER   = 244; // + seq                   -> framed reply: 11 x last torque % received*100 + PWM write ok*10 + current write ok
 const byte STATUS_COUNTS_HEADER = 242; // + seq                   -> framed reply: [0] seconds since boot, [1..] commands received per type (see below)
 const byte STATUS_ERR_HEADER    = 243; // + seq                   -> framed reply: 11 x lib error code of the last PWM write*100 + of the last current write
+const byte HOLD_HERE_HEADER     = 241; // + id + percent 0-100    -> goal = EXACT present position, then torque on at percent (0 = stay limp)
+                                       //    Used when the GUI leaves MANIPULATION mode: the arm keeps the pose it was
+                                       //    moved to by hand, with no 1.44 deg angle-byte rounding and no turn guessing.
+const byte CHECK_RECOVER_HEADER = 240; // + seq                   -> checks EVERY motor and restarts any that is shut down;
+                                       //    framed reply: 11 x (result code*1000 + hardware error found), -1 = not fitted
+                                       //    codes: 0 ok, 1 torque was OFF -> restarted, 2 hardware error -> rebooted + restarted,
+                                       //           3 not answering -> rebooted, back + restarted, 4 STILL not answering,
+                                       //           5 restart failed, 6 torque 0% on purpose -> left off
 
 // Framed replies (READ_ALL / READ_ALL_LOAD) so Processing can never mix up
 // which bytes belong to which motor, even if a reply arrives late:
@@ -280,6 +288,93 @@ void enableMotor(int i) {
   applyGoalCurrent(i);
 }
 
+// HOLD HERE: make the motor's goal its exact present position (raw,
+// multi-turn - so no wrap-around and no angle-byte rounding), THEN torque
+// on. Writing the goal before torque-on means the motor never drives back
+// to an old goal from before it was moved by hand. If the position can't be
+// read at all, the goal is left alone rather than guessed.
+void holdHere(int i) {
+  uint8_t id = DXL_IDS[i];
+  if (dxl.readControlTableItem(ControlTableItem::HARDWARE_ERROR_STATUS, id) != 0) {
+    dxl.reboot(id);
+    delay(100);
+  }
+  bool ok = false;
+  int32_t raw = 0;
+  for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+    raw = (int32_t)dxl.getPresentPosition(id, UNIT_RAW);
+    ok = (dxl.getLastLibErrCode() == DXL_LIB_OK);
+  }
+  if (!ok && motorHaveGoodRaw[i]) { raw = motorLastGoodRaw[i]; ok = true; }
+  if (ok) {
+    motorLastGoodRaw[i] = raw;
+    motorHaveGoodRaw[i] = true;
+    motorTurnBase[i] = turnBaseOf(raw);
+    dxl.setGoalPosition(id, raw); // raw units (library default)
+  }
+  enableMotor(i); // gains, profile, torque on, torque limit
+}
+
+// ---- Check & recover (command 240, sent by the GUI on every Reset) ----
+bool pingRetry(uint8_t id, int tries) {
+  for (int k = 0; k < tries; k++) {
+    if (dxl.ping(id)) return true;
+    delay(5);
+  }
+  return false;
+}
+
+// Generic read that also says whether the motor actually answered
+// (readControlTableItem() returns 0 on failure, which looks like "torque off").
+bool readItemOk(uint8_t item, uint8_t id, int32_t &out) {
+  out = dxl.readControlTableItem(item, id);
+  return dxl.getLastLibErrCode() == DXL_LIB_OK;
+}
+
+// Checks one motor and restarts it if it is shut down. A restarted motor
+// HOLDS WHERE IT IS (holdHere) - the GUI re-sends its target afterwards.
+int16_t checkAndRecover(int i) {
+  uint8_t id = DXL_IDS[i];
+  int code = 0;
+  int32_t errBefore = 0;
+
+  // 1. Is it answering at all? If not, try a reboot (clears a hung motor;
+  //    can't help one that has really lost power or its cable).
+  if (!pingRetry(id, 3)) {
+    dxl.reboot(id);
+    delay(200);
+    if (!pingRetry(id, 3)) return 4000;
+    code = 3;
+  }
+
+  // 2. Hardware error (overload, overheating, voltage...) and torque state.
+  int32_t err = 0, on = 0;
+  if (readItemOk(ControlTableItem::HARDWARE_ERROR_STATUS, id, err) && err != 0) {
+    errBefore = err;
+    if (code == 0) code = 2;
+  }
+  bool onOk = readItemOk(ControlTableItem::TORQUE_ENABLE, id, on);
+
+  // Torque set to 0% from the GUI: limp on purpose - leave it off.
+  if (motorTorquePercent[i] == 0) {
+    if (onOk && on) dxl.torqueOff(id);
+    return (int16_t)((code == 0 ? 6 : code) * 1000 + constrain(errBefore, 0, 255));
+  }
+
+  if (code == 0 && onOk && on && err == 0) return 0; // healthy
+
+  // 3. Restart: reboot if in error, goal = where it is now, torque on, limits.
+  if (code == 0) code = 1;
+  holdHere(i);
+
+  // 4. Did it work?
+  int32_t on2 = 0, err2 = 0;
+  bool on2Ok = readItemOk(ControlTableItem::TORQUE_ENABLE, id, on2);
+  readItemOk(ControlTableItem::HARDWARE_ERROR_STATUS, id, err2);
+  if (!on2Ok || !on2 || err2 != 0) code = 5;
+  return (int16_t)(code * 1000 + constrain(errBefore, 0, 255));
+}
+
 // Sends one framed reply: 11 int16 values (high byte first), in DXL_IDS order.
 void sendFrame(byte header, byte seq, int16_t values[NUM_MOTORS]) {
   byte sum = header + seq;
@@ -411,33 +506,109 @@ void setup() {
   }
 }
 
-void loop() {
+// =====================================================================
+//  COMMAND LINK - framing + flow control (GUI <-> this sketch)
+//
+//  Every command from the GUI is:  <header> <data bytes...> <checksum>
+//    header   : always >= 240 (one of the *_HEADER constants)
+//    data     : fixed count per header (dataLenOf), every byte < 240
+//    checksum : (header + all data bytes) & 0x7F
+//
+//  * Sliced / lost bytes can never be misread: a byte >= 240 where data or
+//    the checksum is expected means the command lost bytes - it is dropped
+//    and that byte is treated as the next header. A wrong checksum drops it
+//    too. (Before, a lost byte shifted everything after it - e.g. a stray
+//    "0" read as a torque percent switched a motor off.)
+//  * No overflow: every command WITHOUT a reply (motion, torque, stiffness,
+//    hold) is answered with ACK (0x06) once it has been fully EXECUTED - or
+//    NAK (0x15) if it was dropped. The GUI waits for that before sending
+//    anything else, so only one command is ever in flight. Commands WITH a
+//    reply (all reads / status / check) are acknowledged by the reply itself.
+// =====================================================================
+const byte ACK_BYTE = 0x06;
+const byte NAK_BYTE = 0x15;
+uint16_t cmdTruncated = 0, cmdBadChecksum = 0, cmdStray = 0;
 
-  // Wait until at least one command byte arrives.
+// Data bytes that follow each header (-1 = not a command).
+int dataLenOf(byte h) {
+  switch (h) {
+    case SYNC_HEADER:          return NUM_MOTORS;
+    case TORQUE_HEADER:
+    case STIFFNESS_HEADER:
+    case TORQUE_LIMIT_HEADER:
+    case SET_ONE_GOAL_HEADER:
+    case HOLD_HERE_HEADER:     return 2;
+    case READ_POSITION_HEADER:
+    case READ_ALL_HEADER:
+    case READ_ALL_LOAD_HEADER:
+    case STATUS_HEADER:
+    case STATUS_PWM_HEADER:
+    case STATUS_CUR_HEADER:
+    case STATUS_LAST_HEADER:
+    case STATUS_ERR_HEADER:
+    case STATUS_COUNTS_HEADER:
+    case CHECK_RECOVER_HEADER: return 1;
+    default:                   return -1;
+  }
+}
+
+// Every 1-data-byte command is a read that answers with its own reply.
+bool hasReply(byte h) { return dataLenOf(h) == 1; }
+
+// Next byte without consuming it, waiting up to 200 ms; -1 on timeout.
+int peekByteWait() {
+  if (!waitForBytes(1)) return -1;
+  return DEBUG_SERIAL.peek();
+}
+
+void handleCommand(byte header, const byte d[]); // defined below loop()
+
+void dropCommand(byte header) {
+  if (header == TORQUE_LIMIT_HEADER) lastTlResult = 1;
+  if (!hasReply(header)) DEBUG_SERIAL.write(NAK_BYTE); // GUI resends it once
+}
+
+void loop() {
   if (DEBUG_SERIAL.available() <= 0) return;
 
+  // Re-sync: anything that isn't a header is a leftover from a broken command.
+  if (DEBUG_SERIAL.peek() < 240) { DEBUG_SERIAL.read(); cmdStray++; return; }
   byte header = DEBUG_SERIAL.read();
+  int n = dataLenOf(header);
+  if (n < 0) { cmdStray++; return; }
+
+  byte d[NUM_MOTORS];
+  byte sum = header;
+  for (int k = 0; k < n; k++) {
+    int b = peekByteWait();
+    if (b < 0 || b >= 240) { cmdTruncated++; dropCommand(header); return; } // lost bytes: a new header (left unread) arrived early
+    d[k] = DEBUG_SERIAL.read();
+    sum += d[k];
+  }
+  int c = peekByteWait();
+  if (c < 0 || c >= 240) { cmdTruncated++; dropCommand(header); return; }
+  DEBUG_SERIAL.read();
+  if (c != (sum & 0x7F)) { cmdBadChecksum++; dropCommand(header); return; }
+
   if (cmdCount[header] < 65000) cmdCount[header]++;
+  handleCommand(header, d);
+  if (!hasReply(header)) DEBUG_SERIAL.write(ACK_BYTE); // done - GUI may send the next one
+}
+
+// Runs one complete, checksum-verified command. d[] = its data bytes.
+void handleCommand(byte header, const byte d[]) {
 
   // CREATE SHAPE / ANIMATION FRAME - all 11 goal positions
   if (header == SYNC_HEADER) {
-    if (!waitForBytes(NUM_MOTORS)) return;
     byte angles[NUM_MOTORS];
-    for (int i = 0; i < NUM_MOTORS; i++) angles[i] = DEBUG_SERIAL.read();
-    // If newer full frames are already waiting, jump straight to the newest
-    // so the arm never lags behind (or overflows on) a fast animation stream.
-    while (DEBUG_SERIAL.available() >= NUM_MOTORS + 1 && DEBUG_SERIAL.peek() == SYNC_HEADER) {
-      DEBUG_SERIAL.read();
-      for (int i = 0; i < NUM_MOTORS; i++) angles[i] = DEBUG_SERIAL.read();
-    }
+    for (int i = 0; i < NUM_MOTORS; i++) angles[i] = d[i];
     writeAllGoals(angles);
   }
 
   // ONE motor's goal position (live slider dragging)
   else if (header == SET_ONE_GOAL_HEADER) {
-    if (!waitForBytes(2)) return;
-    int dxlId = DEBUG_SERIAL.read();
-    int compressedAngle = DEBUG_SERIAL.read();
+    int dxlId = d[0];
+    int compressedAngle = d[1];
     int i = indexForId(dxlId);
     if (i >= 0) {
       dxl.setGoalPosition(dxlId, goalRawFor(i, compressedAngle));
@@ -446,9 +617,8 @@ void loop() {
 
   // TORQUE ON / OFF (Processing sends the real hardware ID, 1-11)
   else if (header == TORQUE_HEADER) {
-    if (!waitForBytes(2)) return;
-    int dxlId = DEBUG_SERIAL.read();
-    int stateValue = DEBUG_SERIAL.read();
+    int dxlId = d[0];
+    int stateValue = d[1];
     int i = indexForId(dxlId);
     if (i >= 0) {
       if (stateValue == 1) enableMotor(i);
@@ -458,9 +628,8 @@ void loop() {
 
   // TORQUE LIMIT - percent of MAX_GOAL_CURRENT_MA; 0 = limp (torque off)
   else if (header == TORQUE_LIMIT_HEADER) {
-    if (!waitForBytes(2)) { lastTlResult = 1; return; }
-    int dxlId = DEBUG_SERIAL.read();
-    int rawPct = DEBUG_SERIAL.read();
+    int dxlId = d[0];
+    int rawPct = d[1];
     int percent = constrain(rawPct, 0, 100);
     lastTlId = dxlId;
     lastTlPct = rawPct;
@@ -477,11 +646,34 @@ void loop() {
     }
   }
 
+  // CHECK & RECOVER - every motor answering, torque on, no hardware error?
+  // Restarts any that isn't (Reset sends this).
+  else if (header == CHECK_RECOVER_HEADER) {
+    byte seq = d[0];
+    int16_t values[NUM_MOTORS];
+    for (int i = 0; i < NUM_MOTORS; i++) {
+      values[i] = (i < ACTIVE_MOTORS) ? checkAndRecover(i) : -1;
+    }
+    sendFrame(header, seq, values);
+  }
+
+  // HOLD HERE - leave manipulation mode: hold the hand-posed angle exactly.
+  else if (header == HOLD_HERE_HEADER) {
+    int dxlId = d[0];
+    int percent = constrain(d[1], 0, 100);
+    int i = indexForId(dxlId);
+    if (i >= 0) {
+      motorLastPctRecv[i] = percent;
+      motorTorquePercent[i] = percent;
+      if (percent == 0) dxl.torqueOff(dxlId);
+      else holdHere(i);
+    }
+  }
+
   // STIFFNESS - Position P Gain level 0-3 (used by animations)
   else if (header == STIFFNESS_HEADER) {
-    if (!waitForBytes(2)) return;
-    int dxlId = DEBUG_SERIAL.read();
-    int level = constrain(DEBUG_SERIAL.read(), 0, 3);
+    int dxlId = d[0];
+    int level = constrain(d[1], 0, 3);
     int i = indexForId(dxlId);
     if (i >= 0) {
       motorPGain[i] = STIFFNESS_P_GAINS[level];
@@ -493,8 +685,7 @@ void loop() {
 
   // READ ONE POSITION - lets Processing ask where a motor actually is.
   else if (header == READ_POSITION_HEADER) {
-    if (!waitForBytes(1)) return;
-    int dxlId = DEBUG_SERIAL.read();
+    int dxlId = d[0];
     int i = indexForId(dxlId);
     if (i >= 0) sendDegrees(dxlId, readPresentRaw(i));
     else sendDegrees(dxlId, 2047); // not fitted: report 180 deg
@@ -503,8 +694,7 @@ void loop() {
   // READ ALL TORQUE USE - how hard each motor is pushing right now, as a
   // percent of its Current Limit (same scale as the torque sliders), x10.
   else if (header == READ_ALL_LOAD_HEADER) {
-    if (!waitForBytes(1)) return;
-    byte seq = DEBUG_SERIAL.read();
+    byte seq = d[0];
     int16_t values[NUM_MOTORS];
     for (int i = 0; i < NUM_MOTORS; i++) {
       if (i >= ACTIVE_MOTORS) { values[i] = 0; continue; }
@@ -523,25 +713,23 @@ void loop() {
   // motors, not from this sketch's memory). Printed by the GUI at startup
   // and on every Reset.
   else if (header == STATUS_COUNTS_HEADER) {
-    if (!waitForBytes(1)) return;
-    byte seq = DEBUG_SERIAL.read();
+    byte seq = d[0];
     // [0] uptime s, [1] 255 sync, [2] 254 torque on/off, [3] 251 torque limit,
     // [4] 249 one goal, [5] 250 read all, [6] 252 stiffness, [7] 253 read one,
-    // [8] timeouts, [9] unknown headers (not >= 242),
+    // [8] DROPPED commands (lost bytes / bad checksum / timed out),
+    // [9] stray bytes skipped while re-syncing,
     // [10] last TORQUE_LIMIT: result*1000 + id byte  (pct byte in [11]? no room -> see 244)
-    uint32_t unknown = 0;
-    for (int h = 0; h < 242; h++) unknown += cmdCount[h];
     int16_t values[NUM_MOTORS] = {
       cap16(millis() / 1000),
       cap16(cmdCount[255]), cap16(cmdCount[254]), cap16(cmdCount[251]), cap16(cmdCount[249]),
-      cap16(cmdCount[250]), cap16(cmdCount[252]), cap16(cmdCount[253]), cap16(cmdTimeouts),
-      cap16(unknown), (int16_t)(lastTlResult < 0 ? -1 : lastTlResult * 1000 + lastTlId) };
+      cap16(cmdCount[250]), cap16(cmdCount[252]), cap16(cmdCount[253]),
+      cap16((uint32_t)cmdTruncated + cmdBadChecksum + cmdTimeouts),
+      cap16(cmdStray), (int16_t)(lastTlResult < 0 ? -1 : lastTlResult * 1000 + lastTlId) };
     sendFrame(header, seq, values);
   }
 
   else if (header == STATUS_LAST_HEADER || header == STATUS_ERR_HEADER) {
-    if (!waitForBytes(1)) return;
-    byte seq = DEBUG_SERIAL.read();
+    byte seq = d[0];
     int16_t values[NUM_MOTORS];
     for (int i = 0; i < NUM_MOTORS; i++) {
       if (header == STATUS_LAST_HEADER) {
@@ -555,8 +743,7 @@ void loop() {
   }
 
   else if (header == STATUS_HEADER || header == STATUS_PWM_HEADER || header == STATUS_CUR_HEADER) {
-    if (!waitForBytes(1)) return;
-    byte seq = DEBUG_SERIAL.read();
+    byte seq = d[0];
     int16_t values[NUM_MOTORS];
     for (int i = 0; i < NUM_MOTORS; i++) {
       if (i >= ACTIVE_MOTORS) { values[i] = -1; continue; }
@@ -579,8 +766,7 @@ void loop() {
 
   // READ ALL POSITIONS - 11 x 2 bytes, base to tip (live angle sliders)
   else if (header == READ_ALL_HEADER) {
-    if (!waitForBytes(1)) return;
-    byte seq = DEBUG_SERIAL.read();
+    byte seq = d[0];
     int16_t values[NUM_MOTORS];
     for (int i = 0; i < NUM_MOTORS; i++) {
       values[i] = (i < ACTIVE_MOTORS) ? degreesX100(DXL_IDS[i], readPresentRaw(i)) : 18000;

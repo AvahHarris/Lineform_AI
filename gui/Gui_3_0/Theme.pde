@@ -3,10 +3,12 @@
 //  Change the colors here to restyle everything in one place.
 // =====================================================================
 
-// Background and panels
-final color THEME_BG           = color(13, 17, 31);        // deep navy behind the 3D arm
-final color THEME_PANEL        = color(24, 30, 50, 230);   // backing panels
-final color THEME_PANEL_EDGE   = color(62, 76, 120);
+// Background and panels. NOT final: these (and the 3D link colors and
+// THEME_ACCENT below) switch between the AI-mode set and the
+// manipulation-mode set - see themeApplyMode().
+color THEME_BG                 = color(13, 17, 31);        // deep navy behind the 3D arm
+color THEME_PANEL              = color(24, 30, 50, 230);   // backing panels
+color THEME_PANEL_EDGE         = color(62, 76, 120);
 final color THEME_TEXT         = color(244, 247, 255);
 final color THEME_MUTED        = color(165, 176, 205);
 
@@ -26,9 +28,50 @@ final color THEME_CTRL_BG      = color(40, 49, 78);        // slider tracks, swi
 final color THEME_CTRL_HOVER   = color(60, 72, 110);
 
 // 3D arm links
-final color THEME_LINK_A       = color(78, 90, 122);       // odd links
-final color THEME_LINK_B       = color(80, 155, 255);      // even links
+color THEME_LINK_A             = color(78, 90, 122);       // odd links
+color THEME_LINK_B             = color(80, 155, 255);      // even links
 final color THEME_LINK_PASSIVE = color(55, 60, 75);        // the fixed passive block
+
+// Angle-bar fill / mode accent (cyan in AI mode, amber in manipulation mode)
+color THEME_ACCENT             = color(0, 200, 255);
+
+// ---- Manipulation-mode color set: warm amber on dark brown, so it is
+// obvious at a glance that the motors are OFF and the arm is free. ----
+final color MANIP_BG           = color(34, 20, 10);
+final color MANIP_PANEL        = color(58, 36, 18, 235);
+final color MANIP_PANEL_EDGE   = color(200, 120, 40);
+final color MANIP_ACCENT       = color(255, 170, 40);      // amber
+final color MANIP_LINK_A       = color(130, 85, 45);
+final color MANIP_LINK_B       = color(255, 160, 50);
+
+// ---- AI-mode color set (the original theme) ----
+final color AI_BG              = color(13, 17, 31);
+final color AI_PANEL           = color(24, 30, 50, 230);
+final color AI_PANEL_EDGE      = color(62, 76, 120);
+final color AI_ACCENT          = color(0, 200, 255);
+final color AI_LINK_A          = color(78, 90, 122);
+final color AI_LINK_B          = color(80, 155, 255);
+
+// Switches the mode-dependent colors and re-colors the angle bars.
+// Called from applyTheme() and whenever the AI / manipulation switch flips.
+void themeApplyMode() {
+  boolean m = manipulationMode;
+  THEME_BG         = m ? MANIP_BG : AI_BG;
+  THEME_PANEL      = m ? MANIP_PANEL : AI_PANEL;
+  THEME_PANEL_EDGE = m ? MANIP_PANEL_EDGE : AI_PANEL_EDGE;
+  THEME_ACCENT     = m ? MANIP_ACCENT : AI_ACCENT;
+  THEME_LINK_A     = m ? MANIP_LINK_A : AI_LINK_A;
+  THEME_LINK_B     = m ? MANIP_LINK_B : AI_LINK_B;
+  if (cp5 == null) return;
+  for (int id = 2; id <= 12; id++) {
+    Controller s = cp5.getController("Motor " + id);
+    if (s == null) continue;
+    s.setColorForeground(THEME_ACCENT);
+    s.setColorActive(themeShade(THEME_ACCENT, 0.3));
+    s.setColorBackground(m ? color(80, 52, 28) : THEME_CTRL_BG);
+  }
+  if (chatInput != null) chatInput.setColorForeground(THEME_PANEL_EDGE);
+}
 
 HashMap<Integer, PFont> uiBoldFontCache = new HashMap<Integer, PFont>();
 
@@ -128,6 +171,7 @@ void applyTheme() {
 
   chatSetMode(chatMode); // re-color the Shape / Animate switch
   chatSetCritic(chatCriticOn); // and the Critic: ON/OFF button
+  themeApplyMode();      // AI / manipulation colors (angle bars, backdrops, 3D links)
 }
 
 // Rounded backing panel in logical (1600x870) coordinates.
