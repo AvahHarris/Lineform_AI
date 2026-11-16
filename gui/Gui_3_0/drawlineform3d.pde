@@ -8,12 +8,11 @@ void drawlineform3d() {
   for (int i = 0; i < MOTOR_COUNT; i++) motorAngles[i] = motorCanvasAngle(i);
   // All 11 rows are drawn; only the first ACTIVE_MOTORS bend (the rest are
   // not fitted on this arm - see local_config.json).
-  int activeMotors = MOTOR_COUNT;
 
-  float gap = LINK_GAP;
-  float linkWidth = LINK_WIDTH;
-  float linkHeight = LINK_HEIGHT;
-  float hinge = LINK_HINGE;
+  // Geometry: see the "3D chain geometry" constants in Gui_3_0.pde (real
+  // XL330 proportions, 0.8 cm bridge gap, pivots on the motor shafts).
+  // aiComputeAchievableCurve() / aiSolveAnglesForCurve() use the same
+  // constants, so the AI's predicted joint positions match what's drawn.
 
   // Collect each joint's actual 3D position as we walk the chain, so we
   // can draw a curve through the real linkage shape afterward. Reading
@@ -22,51 +21,25 @@ void drawlineform3d() {
   // geometry changes.
   ArrayList<PVector> jointCurve = new ArrayList<PVector>();
 
-  // One entry per ACTIVE joint (1-11, parallel to the loop below) holding
-  // that joint's actual pivot point - captured the instant AFTER this
-  // joint's own rotate() but BEFORE translating out to its box center, so
-  // it's the true hinge location, not the link's midpoint. jointCurve above
-  // only ever captures box centers (plus the very first pivot, joint 1's,
-  // which happens to sit at CHAIN_ORIGIN) - this is what "Show Hinges"
-  // draws from.
-  ArrayList<PVector> hingePositions = new ArrayList<PVector>();
-
   pushMatrix();
-  translate(CHAIN_ORIGIN.x, CHAIN_ORIGIN.y, CHAIN_ORIGIN.z);   // where the first ACTIVE joint begins
+  translate(CHAIN_ORIGIN.x, CHAIN_ORIGIN.y, CHAIN_ORIGIN.z);   // = joint 1's pivot
 
-  // Passive block (Dynamixel hardware ID 1, left untorqued in the new
-  // lineform build) sits one segment BEHIND CHAIN_ORIGIN - drawn by
-  // stepping backward before the active chain starts, so CHAIN_ORIGIN
-  // itself keeps meaning exactly what it always has and the IK math
-  // (aiComputeAchievableCurve / aiSolveAnglesForCurve) needs no changes,
-  // only this drawing does. Never rotates - it isn't driven by any slider.
   if (BASE_BLOCK_FIRST) {
-  pushMatrix();
-  translate(-(hinge + gap), 0, 0);
-  translate(gap + linkWidth / 2.0 + (linkWidth - hinge), 0, 0);
-  translate(0, 0, linkHeight / 2.0);
-  fill(THEME_LINK_PASSIVE);
-  stroke(255, 100);
-  strokeWeight(1);
-  box(linkWidth, linkHeight, linkHeight);
-  pushMatrix();
-  translate(0, 0, linkHeight/2 + 1);
-  fill(255);
-  textAlign(CENTER, CENTER);
-  textSize(16);
-  text("12", 0, 0); // real Dynamixel ID of the fixed (passive) base block
-  popMatrix();
-  popMatrix();
-  } else {
-    // No "12" block at the base on this arm: draw a fixed mount instead, so
-    // motor 1 visibly swings about something rather than empty space - a
-    // short flat plate behind the first hinge, never rotated.
+    // Fixed (passive) "12" block BEFORE motor 1: its shaft is joint 1's
+    // pivot, so it sits one step behind, never rotating.
     pushMatrix();
-    translate(-linkWidth * 0.45, 0, linkHeight / 2.0);
+    translate(LINK_BOX_CENTER_X - LINK_STEP, 0, 0);
+    drawLinkBlock(0, THEME_LINK_PASSIVE, "12");
+    popMatrix();
+  } else {
+    // No "12" block at the base on this arm: a fixed mount plate behind
+    // joint 1, so motor 1 visibly swings about something.
+    pushMatrix();
+    translate(-LINK_WIDTH * 0.45, 0, 0);
     fill(THEME_LINK_PASSIVE);
     stroke(255, 100);
     strokeWeight(1);
-    box(linkWidth * 0.5, linkHeight * 1.6, linkHeight * 1.6);
+    box(LINK_WIDTH * 0.5, LINK_THICK * 1.6, LINK_THICK * 1.6);
     popMatrix();
   }
 
@@ -80,13 +53,13 @@ void drawlineform3d() {
 
   jointCurve.add(new PVector(modelX(0, 0, 0), modelY(0, 0, 0), modelZ(0, 0, 0)));
 
-  for (int i = 0; i < activeMotors; i++) {
+  for (int i = 0; i < MOTOR_COUNT; i++) {
 
     int motorNumber = i + 1;    // software "Motor N" slider index (1-11)
-    int dxlId = motorNumber + 1; // real hardware Dynamixel ID (2-12) - ID 1 is the passive block above
+    int dxlId = motorNumber + 1; // internal row id (2-12)
 
     boolean fitted = i < ACTIVE_MOTORS; // a real motor on this arm?
-    float safeAngle = constrain(motorAngles[i], 60, 300); //1. rotate first
+    float safeAngle = constrain(motorAngles[i], 0, 360); // NOT the joint limits: the 3D view shows the TRUE angle, even past a limit
     float angle = fitted ? safeAngle - 180 : 0; // not fitted: always straight
 
     if (aiIsMirroredMotor(dxlId)) {
@@ -95,151 +68,43 @@ void drawlineform3d() {
 
     float rad = radians(angle);
 
-  // Rotate at the joint before drawing the segment
+    // Rotate at the joint (the previous block's shaft) before drawing.
     if (motorNumber % 2 == 1) {
       rotateZ(-rad);
     } else {
       rotateY(rad);
     }
 
-    // This IS the hinge: the origin right here, after the rotate above and
-    // before any translate toward the box, is exactly where this joint's
-    // simulated pivot sits. hingeOffsetX/Y/Z (Gui_07_07.pde) nudges that
-    // onto where the real Dynamixel's shaft actually is, in this same
-    // local frame - same offset for every joint, since the hardware is
-    // identical at each one. Captured now so "Show Hinges" can mark it
-    // later, once we're back out of this matrix stack.
-    if (fitted) { // only real motors get a hinge marker
-      pushMatrix();
-      translate(hingeOffsetX, hingeOffsetY, hingeOffsetZ);
-      hingePositions.add(new PVector(modelX(0, 0, 0), modelY(0, 0, 0), modelZ(0, 0, 0)));
-      popMatrix();
-    }
+    // Bridge bracket across the 0.8 cm gap (turns with this joint).
+    drawLinkBridge(motorNumber);
 
-    // draw current motor block first
+    // This motor's block.
     pushMatrix();
-    translate(gap + linkWidth / 2.0 + (linkWidth - hinge), 0, 0); //draw where box will go lenght of gap + width + hinge? 
-    translate(0, 0, linkHeight / 2.0); 
+    translate(LINK_BOX_CENTER_X, 0, 0);
+    color c = !fitted ? THEME_LINK_PASSIVE : (motorNumber % 2 == 1 ? THEME_LINK_A : THEME_LINK_B);
+    drawLinkBlock(motorNumber, c, "" + displayId(dxlId)); // 1 next to the base ... 11 at the tip
 
-    stroke(255, 100);
-    strokeWeight(1);
-
-    if (!fitted) fill(THEME_LINK_PASSIVE);
-    else if (motorNumber % 2 == 1) fill(THEME_LINK_A);
-    else fill(THEME_LINK_B);
-
-    box(linkWidth, linkHeight, linkHeight); //draw box
-
-    // Record this box's actual center in world space (not the hinge point
-    // beside it), so the curve is glued straight through the boxes instead
-    // of floating along the pivot line next to them.
+    // Record this block's actual centre in world space, so the curve runs
+    // straight through the blocks.
     jointCurve.add(new PVector(modelX(0, 0, 0), modelY(0, 0, 0), modelZ(0, 0, 0)));
-
-    pushMatrix();
-
-    translate(0, 0, linkHeight/2 + 1);  // move to front face for text
-
-    fill(255);
-    textAlign(CENTER, CENTER);
-    textSize(16);
-    text(displayId(dxlId), 0, 0); // motor number shown to the user (1 next to the base ... 11 at the tip)
-
     popMatrix();
 
-    popMatrix();
-
-    translate(hinge+gap, 0, 0);
+    translate(LINK_STEP, 0, 0); // to the next pivot (this block's shaft)
   }
 
   // Fixed "12" block AFTER the last motor (BASE_BLOCK_FIRST = false in
-  // local_config.json) - drawn as one more straight grey segment.
+  // local_config.json) - one more straight grey block.
   if (!BASE_BLOCK_FIRST) {
+    drawLinkBridge(MOTOR_COUNT + 1);
     pushMatrix();
-    translate(gap + linkWidth / 2.0 + (linkWidth - hinge), 0, 0);
-    translate(0, 0, linkHeight / 2.0);
-    fill(THEME_LINK_PASSIVE);
-    stroke(255, 100);
-    strokeWeight(1);
-    box(linkWidth, linkHeight, linkHeight);
-    translate(0, 0, linkHeight/2 + 1);
-    fill(255);
-    textAlign(CENTER, CENTER);
-    textSize(16);
-    text("12", 0, 0);
+    translate(LINK_BOX_CENTER_X, 0, 0);
+    drawLinkBlock(MOTOR_COUNT + 1, THEME_LINK_PASSIVE, "12");
     popMatrix();
   }
   popMatrix();
 
-  // Hinge reference markers - a small sphere + "Hn Lx" tag (n = the real
-  // hardware Dynamixel ID, matching the numbers already printed on the
-  // boxes; x = that joint's current stiffness level, 0 = full stiffness)
-  // at each active joint's actual pivot point. Pure reference for
-  // designing a shape by hand on the sliders: toggled on/off from the
-  // "Show Hinges" switch, never read by any shape/fitting code.
-  //
-  // Color is red at level 0, fading toward pale pink as the level (and so
-  // the Position P Gain) drops - a tap softens one more notch, so a
-  // lighter marker reads as "this one's gone loose." The hit-test against
-  // a pending click (hingeClickPending, set by mousePressed() in
-  // Gui_07_07.pde) has to happen HERE, in the same draw() frame the
-  // markers are actually rendered in, because screenX()/screenY() need
-  // this frame's live camera transform to mean anything.
-  if (showHingeMarkers) {
-    float bestClickDist = HINGE_CLICK_RADIUS;
-    int bestClickDxlId = -1;
-
-    for (int i = 0; i < hingePositions.size(); i++) {
-      PVector hp = hingePositions.get(i);
-      int dxlId = i + 2; // position 1 (first active joint) = hardware ID 2
-      int level = hingeStiffnessLevel[i];
-
-      color markerColor = lerpColor(
-        color(255, 0, 0),
-        color(255, 190, 190),
-        level / float(NUM_STIFFNESS_LEVELS - 1)
-      );
-
-      pushMatrix();
-      translate(hp.x, hp.y, hp.z);
-      noStroke();
-      fill(markerColor);
-      sphere(4);
-
-      translate(0, 0, 14);
-      fill(markerColor);
-      textAlign(CENTER, CENTER);
-      textSize(11);
-      text("H" + displayId(dxlId) + " L" + level, 0, 0);
-      popMatrix();
-
-      if (hingeClickPending) {
-        float sx = screenX(hp.x, hp.y, hp.z);
-        float sy = screenY(hp.x, hp.y, hp.z);
-        float d = dist(sx, sy, hingeClickX, hingeClickY);
-        if (d < bestClickDist) {
-          bestClickDist = d;
-          bestClickDxlId = dxlId;
-        }
-      }
-    }
-
-    if (hingeClickPending && bestClickDxlId != -1) {
-      // Cycle this joint's stiffness level and push it to the Arduino,
-      // which looks the level up in its own table (STIFFNESS_P_GAINS) and
-      // writes Position P Gain directly - torque stays on throughout, so
-      // this is a live feel change, not a drop-then-recover snap.
-      int idx = bestClickDxlId - 2;
-      hingeStiffnessLevel[idx] = (hingeStiffnessLevel[idx] + 1) % NUM_STIFFNESS_LEVELS;
-      sendHingeStiffness(bestClickDxlId, hingeStiffnessLevel[idx]);
-      println("Hinge " + displayId(bestClickDxlId) + " stiffness level " + hingeStiffnessLevel[idx]
-        + " (P gain " + STIFFNESS_P_GAIN_DISPLAY[hingeStiffnessLevel[idx]] + ")");
-    }
-  }
-
-  // However the tap above resolved (hit a marker, missed, or markers were
-  // hidden entirely this frame), the click is consumed now - it must never
-  // carry over into next frame's hit-test.
-  hingeClickPending = false;
+  // (Clickable hinge markers removed 2026-11-16 - stiffness is set per row
+  // with the ANGLE | TORQUE | STIFF selector in the left panel.)
 
   // Curve through the actual joint positions - the real 3D shape the
   // linkage takes given the current slider angles. Drawn in the same
@@ -305,4 +170,58 @@ void drawlineform3d() {
     strokeWeight(2);
     line(tip.x, tip.y, tip.z, anchor.x, anchor.y, anchor.z);
   }
+}
+
+// One motor block, centred at the current origin (on the hinge axis).
+// Block n is THIN along the axis of joint n+1 (the joint at its far end,
+// whose shaft it carries) and THICK in that joint's bending plane: joint
+// n+1 bends about Z when n+1 is odd, about Y when it is even. So
+// consecutive blocks are turned 90 deg to each other, like the real arm.
+void drawLinkBlock(int n, color c, String label) {
+  boolean nextAboutZ = (n + 1) % 2 == 1;
+  float sy = nextAboutZ ? LINK_THICK : LINK_THIN;
+  float sz = nextAboutZ ? LINK_THIN : LINK_THICK;
+  fill(c);
+  stroke(255, 100);
+  strokeWeight(1);
+  box(LINK_WIDTH, sy, sz);
+  pushMatrix();
+  translate(0, 0, sz / 2.0 + 1); // front face, for the number
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(16);
+  text(label, 0, 0);
+  popMatrix();
+}
+
+// Bridge bracket of joint j, drawn at its pivot (current origin, after the
+// joint's rotation, so it turns with the block it drives): two side plates
+// on the shaft ends, just outside the previous block's THIN sides, reaching
+// across the gap to the next block's end face, plus the plate across that
+// face. Visual only.
+void drawLinkBridge(int j) {
+  boolean aboutZ = j % 2 == 1;                  // this joint's axis
+  float plateT = 1.6 * LINK_UNITS_PER_MM;       // bracket thickness
+  float plateW = LINK_THIN * 0.8;               // width in the bending plane
+  float x0 = -LINK_SHAFT_FROM_END * 0.9;        // from around the shaft...
+  float x1 = LINK_SHAFT_FROM_END + LINK_GAP;    // ...to the next block's end face
+  float off = LINK_THIN / 2.0 + plateT / 2.0 + 0.5;
+  pushStyle();
+  fill(150, 156, 168, 70);   // dim, see-through grey - the brackets shouldn't compete with the blocks
+  stroke(255, 25);
+  strokeWeight(1);
+  for (int side = -1; side <= 1; side += 2) {
+    pushMatrix();
+    if (aboutZ) translate((x0 + x1) / 2.0, 0, side * off);
+    else translate((x0 + x1) / 2.0, side * off, 0);
+    if (aboutZ) box(x1 - x0, plateW, plateT);
+    else box(x1 - x0, plateT, plateW);
+    popMatrix();
+  }
+  pushMatrix(); // across the next block's end face
+  translate(x1 - plateT / 2.0, 0, 0);
+  if (aboutZ) box(plateT, plateW, 2 * off + plateT);
+  else box(plateT, 2 * off + plateT, plateW);
+  popMatrix();
+  popStyle();
 }

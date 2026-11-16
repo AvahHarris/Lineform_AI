@@ -73,6 +73,11 @@ float[] motorActualDeg = new float[MOTOR_COUNT];
 // If the bar's value differs from this, something else set it - a dragged
 // value, an AI shape, Reset... - and it's a PENDING target, not a reading.
 float[] motorDisplayedDeg = new float[MOTOR_COUNT];
+// The TRUE value behind each bar, unclamped (internal degrees). The bar
+// itself can only show JOINT_MIN..MAX, so a joint pushed past a limit by hand
+// would otherwise read as exactly 0 / 180 - the readout and the 3D view use
+// this instead, so angle detection is never distorted by the bar's range.
+float[] motorShownDeg = new float[MOTOR_COUNT];
 boolean[] motorJumpSeen = new boolean[MOTOR_COUNT];
 final float MAX_READING_JUMP_DEG = 45;
 long motorActualMs = 0;
@@ -103,6 +108,10 @@ void motorsSetup() {
     motorPrevActual[i] = motorLastSentDeg[i];
     motorRestBaseline[i] = Float.NaN;
     motorDisplayedDeg[i] = motorLastSentDeg[i];
+    motorShownDeg[i] = motorLastSentDeg[i];
+    // ControlP5's own value label would print the INTERNAL angle (e.g. 180);
+    // motorsDrawAngleReadouts() draws the displayed 0-180 value instead.
+    cp5.getController("Motor " + (i + 2)).getValueLabel().setVisible(false);
   }
   if (serialConnected()) {
     thread("motorsLiveReaderLoop");
@@ -110,33 +119,154 @@ void motorsSetup() {
   }
 }
 
-boolean motorShowsAngle(int i) {
-  if (cp5 == null || manipulationMode) return true; // manipulation: every row shows its angle
-  Controller t = cp5.getController("View " + (i + 2));
-  return t == null || ((Toggle) t).getState();
-}
+// ---- Per-row view: which bar the row shows (3-way selector) ----
+final int VIEW_ANGLE = 0, VIEW_TORQUE = 1, VIEW_STIFF = 2;
+int[] motorView = new int[MOTOR_COUNT]; // all start on ANGLE
 
-// Shows the angle or the torque slider for a row, to match its switch.
+boolean motorShowsAngle(int i) {
+  if (manipulationMode) return true; // manipulation: every row shows its angle
+  return motorView[i] == VIEW_ANGLE;
+}
+boolean motorShowsTorque(int i) { return !manipulationMode && motorView[i] == VIEW_TORQUE; }
+boolean motorShowsStiff(int i)  { return !manipulationMode && motorView[i] == VIEW_STIFF; }
+
+// Shows the angle, torque or stiffness bar for a row, to match its selector.
 void motorsApplyView(int dxlId) {
   int i = dxlId - 2;
-  boolean angle = motorShowsAngle(i);
   Controller a = cp5.getController("Motor " + dxlId);
   Controller t = cp5.getController("Torque Level " + dxlId);
-  if (a != null) a.setVisible(angle);
-  if (t != null) t.setVisible(!angle);
+  Controller st = cp5.getController("Stiffness " + dxlId);
+  if (a != null) a.setVisible(motorShowsAngle(i));
+  if (t != null) t.setVisible(motorShowsTorque(i));
+  if (st != null) st.setVisible(motorShowsStiff(i));
   motorHandMoved[i] = false;
   motorRestCount[i] = 0;
+}
+
+// ---- STIFFNESS bar ----
+// 4 steps; the bar is FULL at full stiffness: value 3 = level 0 (normal
+// holding) ... value 0 = level 3 (very soft). Level -> Position P gain is set
+// per arm in firmware local_config.h (STIFFNESS_P_GAINS_LIST). Replaces the
+// old clickable hinge markers in the 3D view.
+final String[] STIFF_NAMES = {"full", "medium", "soft", "very soft"};
+
+void motorsAddStiffnessSlider(int dxlId, float x, float y) {
+  Slider s = cp5.addSlider("Stiffness " + dxlId)
+    .setPosition(x, y)
+    .setRange(0, NUM_STIFFNESS_LEVELS - 1)
+    .setValue(NUM_STIFFNESS_LEVELS - 1)
+    .setNumberOfTickMarks(NUM_STIFFNESS_LEVELS)
+    .snapToTickMarks(true)
+    .showTickMarks(false)
+    .setSize(SLIDER_W, SLIDER_H)
+    .setLabel("Stiff " + displayId(dxlId))
+    .setVisible(false);
+  s.getValueLabel().setVisible(false); // motorsDrawStiffOverlay() writes the level name
+}
+
+// Keeps each stiffness bar showing its joint's real level, whatever changed
+// it (animations, Reset, the twitch safety net). Called every frame.
+void motorsSyncStiffnessSliders() {
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    Controller s = cp5.getController("Stiffness " + (i + 2));
+    if (s == null || s.isMousePressed()) continue;
+    float want = NUM_STIFFNESS_LEVELS - 1 - hingeStiffnessLevel[i];
+    if (abs(s.getValue() - want) > 0.01) {
+      s.setBroadcast(false);
+      s.setValue(want);
+      s.setBroadcast(true);
+    }
+  }
+}
+
+void motorsDrawStiffOverlay() {
+  pushStyle();
+  textFont(hudFont);
+  hudTextSize(13);
+  textAlign(LEFT, CENTER);
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    if (!motorShowsStiff(i)) continue;
+    float y = ROW_START_Y + i * ROW_STEP + SLIDER_H / 2.0;
+    int level = hingeStiffnessLevel[i];
+    String t = STIFF_NAMES[constrain(level, 0, STIFF_NAMES.length - 1)] + "  (L" + level + ")";
+    fill(0, 120);
+    hudText(t, SLIDER_X + 5, y + 1);
+    fill(255);
+    hudText(t, SLIDER_X + 4, y);
+  }
+  popStyle();
+}
+
+// ---- 3-way selector: ANGLE | TORQUE | STIFF (drawn here, not ControlP5) ----
+final float VIEW_SEL_W = 130;
+final float[] VIEW_SEG_W = {40, 50, 40};
+final String[] VIEW_NAMES = {"ANGLE", "TORQUE", "STIFF"};
+
+color motorsViewColor(int v) {
+  return v == VIEW_ANGLE ? THEME_ACCENT : (v == VIEW_TORQUE ? THEME_ORANGE : THEME_PURPLE);
+}
+
+void motorsDrawViewSelectors() {
+  pushStyle();
+  textFont(uiBoldFont(max(7, round(10 * uiScale))));
+  textAlign(CENTER, CENTER);
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    float y = ROW_START_Y + i * ROW_STEP;
+    float x = TOGGLE_X;
+    int hover = motorsViewSegmentAt(mouseX, mouseY, i);
+    for (int v = 0; v < 3; v++) {
+      float w = VIEW_SEG_W[v];
+      color c = motorsViewColor(v);
+      boolean on = motorView[i] == v;
+      float rl = v == 0 ? 6 * uiScale : 0, rr = v == 2 ? 6 * uiScale : 0;
+      noStroke();
+      fill(on ? c : themeShade(c, hover == v ? -0.45 : -0.68));
+      rect(uiX(x), uiY(y), w * uiScale, TOGGLE_H * uiScale, rl, rr, rr, rl);
+      fill(on ? color(15, 20, 35) : themeShade(c, -0.15));
+      hudText(VIEW_NAMES[v], x + w / 2.0, y + TOGGLE_H / 2.0);
+      x += w;
+    }
+  }
+  popStyle();
+}
+
+// Which segment (0-2) of row i's selector is at pixel (mx, my), or -1.
+int motorsViewSegmentAt(float mx, float my, int i) {
+  float y = ROW_START_Y + i * ROW_STEP;
+  if (my < uiY(y) || my > uiY(y + TOGGLE_H)) return -1;
+  float x = TOGGLE_X;
+  for (int v = 0; v < 3; v++) {
+    if (mx >= uiX(x) && mx < uiX(x + VIEW_SEG_W[v])) return v;
+    x += VIEW_SEG_W[v];
+  }
+  return -1;
+}
+
+boolean motorsViewMouseOver() {
+  if (manipulationMode) return false;
+  for (int i = 0; i < MOTOR_COUNT; i++) if (motorsViewSegmentAt(mouseX, mouseY, i) >= 0) return true;
+  return false;
+}
+
+// Called from mousePressed(). Returns true if a selector was clicked.
+boolean motorsViewMousePressed() {
+  if (manipulationMode) return false;
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    int v = motorsViewSegmentAt(mouseX, mouseY, i);
+    if (v < 0) continue;
+    if (motorView[i] != v) {
+      motorView[i] = v;
+      motorsApplyView(i + 2);
+    }
+    return true;
+  }
+  return false;
 }
 
 // Back to ANGLE view and 100% torque (used by Reset).
 void motorsResetMotor(int dxlId) {
   int i = dxlId - 2;
-  Toggle v = cp5.get(Toggle.class, "View " + dxlId);
-  if (v != null) {
-    v.setBroadcast(false);
-    v.setState(true);
-    v.setBroadcast(true);
-  }
+  motorView[i] = VIEW_ANGLE;
   Controller t = cp5.getController("Torque Level " + dxlId);
   if (t != null) {
     t.setBroadcast(false);
@@ -157,10 +287,18 @@ void motorsResetMotor(int dxlId) {
 // Returns true if the event belonged to a motor row.
 boolean motorsHandleControlEvent(String name, float value) {
   // Manipulation mode: these controls are hidden/locked - swallow any stray event.
-  if (manipulationMode && (name.startsWith("View ") || name.startsWith("Power ")
+  if (manipulationMode && (name.startsWith("Stiffness ") || name.startsWith("Power ")
       || name.startsWith("Torque Level ") || name.startsWith("Motor "))) return true;
-  if (name.startsWith("View ")) {
-    motorsApplyView(int(name.substring(5)));
+  if (name.startsWith("Stiffness ")) {
+    int i = int(name.substring(10)) - 2;
+    if (i < 0 || i >= MOTOR_COUNT) return true;
+    int level = constrain(NUM_STIFFNESS_LEVELS - 1 - round(value), 0, NUM_STIFFNESS_LEVELS - 1);
+    if (level != hingeStiffnessLevel[i]) {
+      hingeStiffnessLevel[i] = level;
+      sendHingeStiffness(i + 2, level);
+      println("Motor " + displayId(i + 2) + " stiffness -> " + STIFF_NAMES[level] + " (level " + level
+        + "; P gain per level is set in firmware local_config.h)");
+    }
     return true;
   }
   if (name.startsWith("Power ")) {
@@ -210,7 +348,8 @@ void motorsDisplay(int i, float deg) {
   s.setValue(deg);
   s.setBroadcast(true);
   updatingShapeControls = false;
-  motorDisplayedDeg[i] = s.getValue();
+  motorDisplayedDeg[i] = s.getValue(); // what the bar could show (clamped to its range)
+  motorShownDeg[i] = deg;              // the true value, unclamped
 }
 
 // Call right after a full 255 frame was sent with these targets.
@@ -219,6 +358,7 @@ void motorsNoteSentAll(float[] targets) {
   for (int i = 0; i < MOTOR_COUNT; i++) {
     motorLastSentDeg[i] = targets[i];
     motorDisplayedDeg[i] = cp5.getController("Motor " + (i + 2)).getValue(); // no longer pending
+    motorShownDeg[i] = motorDisplayedDeg[i]; // until the next reading arrives
     motorLastSendMs[i] = now;
     motorHandMoved[i] = false;
     motorRestCount[i] = 0;
@@ -228,10 +368,11 @@ void motorsNoteSentAll(float[] targets) {
 }
 
 void motorsSendOneGoal(int i, float degrees) {
-  degrees = constrain(degrees, 60, 310);
-  if (rowActive(i + 2)) sendSerialBytes(SET_ONE_GOAL_HEADER, hwId(i + 2), int(map(degrees, 0, 360, 0, 250)));
+  degrees = clampJoint(degrees);
+  if (rowActive(i + 2)) sendSerialBytes(SET_ONE_GOAL_HEADER, hwId(i + 2), round(map(degrees, 0, 360, 0, 250)));
   motorLastSentDeg[i] = degrees;
   motorDisplayedDeg[i] = cp5.getController("Motor " + (i + 2)).getValue(); // no longer pending
+  motorShownDeg[i] = motorDisplayedDeg[i]; // until the next reading arrives
   motorLastSendMs[i] = millis();
   motorReachedGoal[i] = false;
   motorRestBaseline[i] = Float.NaN; // re-measure where it settles
@@ -314,6 +455,7 @@ void motorsTick() {
 
   for (int i = 0; i < MOTOR_COUNT; i++) {
     if (!rowActive(i + 2)) continue; // not a real motor on this arm
+    motorsTwitchCheck(i, r[i], now);  // oscillation safety net (below)
     float actual = r[i];
     boolean moving = abs(actual - motorPrevActual[i]) > 0.6;
     motorPrevActual[i] = actual;
@@ -363,7 +505,7 @@ void motorsTick() {
     if (motorRestCount[i] >= 3) {
       // The goal is simply where you left it (the firmware's I term removes
       // gravity droop, so it stays put).
-      motorsSendOneGoal(i, constrain(actual, 60, 310));
+      motorsSendOneGoal(i, clampJoint(actual)); // past a limit by hand -> holds AT the limit
       motorHandMoved[i] = false;
       motorRestCount[i] = 0;
       motorReachedGoal[i] = true;
@@ -481,7 +623,7 @@ void motorsDrawLoadOverlay() {
   hudTextSize(12);
   textAlign(RIGHT, CENTER);
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    if (motorShowsAngle(i)) continue;
+    if (!motorShowsTorque(i)) continue;
     float y = ROW_START_Y + i * ROW_STEP;
     float pct = constrain(loads[i], 0, 100);
     float lx = SLIDER_X + SLIDER_W * pct / 100.0;
@@ -574,9 +716,50 @@ String motorsTorqueNote() {
 // during animations, with an unsent change (press Create Shape), when
 // offline, for inactive rows, or if readings are stale.
 float motorCanvasAngle(int i) {
-  // The bars now show the live angle themselves (or a pending target), so
-  // the canvas simply draws what the bars say.
-  return cp5.get(Slider.class, "Motor " + (i + 2)).getValue();
+  // A pending target (dragged value, AI shape, animation frame) -> the bar.
+  // Otherwise the TRUE angle behind the bar, unclamped - so a joint pushed
+  // past its 0/180 limit is drawn where it really is, not at the limit.
+  if (motorSliderPending(i)) return cp5.get(Slider.class, "Motor " + (i + 2)).getValue();
+  return motorShownDeg[i];
+}
+
+// The number shown on row i's angle bar, in INTERNAL degrees.
+float motorReadoutDeg(int i) {
+  if (motorSliderPending(i)) return cp5.getController("Motor " + (i + 2)).getValue();
+  return motorShownDeg[i];
+}
+
+// Angle readouts on the bars, in DISPLAYED degrees (90 = straight, -15..195).
+// Replaces ControlP5's own value label (which would show 90-270). Red with
+// "LIMIT" when the true angle is past a limit (only possible by hand).
+// Drawn after cp5.draw() so it sits on top of the bar.
+void motorsDrawAngleReadouts() {
+  pushStyle();
+  textFont(hudFont);
+  hudTextSize(13);
+  textAlign(LEFT, CENTER);
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    if (!motorShowsAngle(i)) continue;
+    float y = ROW_START_Y + i * ROW_STEP + SLIDER_H / 2.0;
+    // Tick marks at displayed 0 and 180: the normal range. The bar runs
+    // JOINT_EXTRA_DEG further each way for motors that can travel more.
+    stroke(255, 150);
+    strokeWeight(max(1, 1.5 * uiScale));
+    for (float tick : new float[] {90, 270}) {
+      float tx = SLIDER_X + SLIDER_W * (tick - JOINT_MIN_DEG) / (JOINT_MAX_DEG - JOINT_MIN_DEG);
+      line(uiX(tx), uiY(y - SLIDER_H / 2.0), uiX(tx), uiY(y - SLIDER_H / 2.0 + 5));
+      line(uiX(tx), uiY(y + SLIDER_H / 2.0 - 5), uiX(tx), uiY(y + SLIDER_H / 2.0));
+    }
+    noStroke();
+    float v = motorReadoutDeg(i);
+    boolean past = rowActive(i + 2) && (v < JOINT_MIN_DEG - 0.5 || v > JOINT_MAX_DEG + 0.5);
+    String t = nf(toDisplayDeg(v), 1, 1) + "\u00B0" + (past ? "  LIMIT" : "");
+    fill(0, 120);
+    hudText(t, SLIDER_X + 5, y + 1);      // soft shadow so it reads on any fill
+    fill(past ? color(255, 80, 80) : color(255));
+    hudText(t, SLIDER_X + 4, y);
+  }
+  popStyle();
 }
 
 // ---- Torque ON/OFF switch (one per row, like the backup GUI) ----
@@ -638,6 +821,81 @@ void motorsApplyPower(int i, boolean on) {
 void motorsStartupDiagnostics() {
   delay(2500); // let the Arduino finish booting / setting up the motors
   motorsRunDiagnostics();
+}
+
+// ---- Twitch (oscillation) safety net ----
+// A holding motor whose reading keeps reversing direction - TWITCH_REVERSALS
+// direction changes of at least TWITCH_MIN_STEP_DEG within TWITCH_WINDOW_MS -
+// is oscillating (seen on XL330-M077s at a too-high P gain when the load on
+// them changes). It is softened one stiffness level (lower P gain, I term
+// off); if it is already at the softest level, it is switched OFF. Each step
+// is reported in the chat. Reset restores full stiffness. The lasting fix is
+// a lower P_GAIN_PCT_LIST entry for that motor in firmware local_config.h.
+// Not checked during animations, while you drag that motor's bar, or for
+// motors that are OFF / at 0%.
+final float TWITCH_MIN_STEP_DEG = 2.5; // swings smaller than this are ignored (sensor noise up to ~+/-1 deg never triggers)
+final int TWITCH_REVERSALS = 4;
+final int TWITCH_WINDOW_MS = 1500;
+float[] twLast = new float[MOTOR_COUNT];
+int[] twDir = new int[MOTOR_COUNT];
+long[][] twReversalMs = new long[MOTOR_COUNT][8];
+int[] twReversalHead = new int[MOTOR_COUNT];
+float[][] twRecent = new float[MOTOR_COUNT][8];
+int[] twRecentHead = new int[MOTOR_COUNT];
+long[] twLastActionMs = new long[MOTOR_COUNT];
+boolean twInit = false;
+
+void motorsTwitchReset(int i) {
+  twLast[i] = Float.NaN;
+  twDir[i] = 0;
+  for (int k = 0; k < 8; k++) { twReversalMs[i][k] = 0; twRecent[i][k] = Float.NaN; }
+}
+
+void motorsTwitchCheck(int i, float v, long now) {
+  if (!twInit) { for (int k = 0; k < MOTOR_COUNT; k++) motorsTwitchReset(k); twInit = true; }
+  Controller s = cp5.getController("Motor " + (i + 2));
+  boolean dragging = motorDragPending[i] || (s != null && s.isMousePressed());
+  if (dragging || !motorPowerOn(i) || motorTorquePct[i] == 0) { motorsTwitchReset(i); return; }
+
+  if (Float.isNaN(twLast[i])) { twLast[i] = v; return; }
+  float d = v - twLast[i];
+  if (abs(d) < TWITCH_MIN_STEP_DEG) return; // jitter: ignore (slow drift still adds up)
+  int dir = d > 0 ? 1 : -1;
+  twRecent[i][twRecentHead[i]] = v;
+  twRecentHead[i] = (twRecentHead[i] + 1) % 8;
+  if (twDir[i] != 0 && dir != twDir[i]) {
+    twReversalMs[i][twReversalHead[i]] = now;
+    twReversalHead[i] = (twReversalHead[i] + 1) % 8;
+  }
+  twDir[i] = dir;
+  twLast[i] = v;
+
+  int n = 0;
+  for (int k = 0; k < 8; k++) if (twReversalMs[i][k] > 0 && now - twReversalMs[i][k] <= TWITCH_WINDOW_MS) n++;
+  if (n < TWITCH_REVERSALS || now - twLastActionMs[i] < 2000) return;
+
+  float lo = 1e9, hi = -1e9;
+  for (int k = 0; k < 8; k++) if (!Float.isNaN(twRecent[i][k])) { lo = min(lo, twRecent[i][k]); hi = max(hi, twRecent[i][k]); }
+  twLastActionMs[i] = now;
+  motorsTwitchReset(i);
+
+  int rowId = i + 2;
+  String who = "Motor " + displayId(rowId) + " is twitching (" + n + " direction changes in "
+    + nf(TWITCH_WINDOW_MS / 1000.0, 1, 1) + " s, swinging ~" + round(hi - lo) + "\u00B0)";
+  int level = hingeStiffnessLevel[i];
+  String msg;
+  if (level < NUM_STIFFNESS_LEVELS - 1) {
+    level++;
+    hingeStiffnessLevel[i] = level;
+    sendHingeStiffness(rowId, level);
+    msg = who + " - softened it to stiffness level " + level + ". Reset restores full stiffness; "
+      + "for a lasting fix lower its P_GAIN_PCT_LIST entry in firmware local_config.h.";
+  } else {
+    motorsSetPowerSwitch(i, false);
+    msg = who + " even at the softest level - switched it OFF. Check its cable/power, then switch it back ON.";
+  }
+  println("!!! " + msg);
+  chatAdd("error", msg);
 }
 
 // ---- Reset: check every motor and restart any that is shut down ----

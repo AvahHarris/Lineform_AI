@@ -164,17 +164,6 @@ void dispose() {
   releaseMotorsOnExit();
   super.dispose();
 }
-Toggle toggle1;
-Toggle toggle2;
-Toggle toggle3;
-Toggle toggle4;
-Toggle toggle5;
-Toggle toggle6;
-Toggle toggle7;
-Toggle toggle8;
-Toggle toggle9;
-Toggle toggle10;
-Toggle toggle11;
 
 final int MOTOR_COUNT = 11;
 
@@ -194,12 +183,38 @@ final int ROW_STEP = 36;
 final int ROW_START_Y = 20;
 
 // ---- 3D chain geometry - shared by drawlineform3d() (renders it) and
-// aiComputeAchievableCurve() (predicts joint positions so the AI preview
-// curve can be aligned to them) so the two can never drift out of sync. ----
-final float LINK_GAP = 9;
-final float LINK_WIDTH = 52;
-final float LINK_HEIGHT = 36;
-final float LINK_HINGE = LINK_WIDTH * 0.9;
+// aiComputeAchievableCurve() / aiSolveAnglesForCurve() / FABRIK (predict
+// joint positions for the AI) so they can never drift out of sync. ----
+// Real hardware (2026-11-16): Dynamixel XL330-M077-T, body 34 x 26 x 20 mm,
+// joined by bridge brackets with a ~0.8 cm gap between neighbouring bodies.
+// Each block is the motor body; consecutive blocks are turned 90 deg about
+// the chain axis (odd joints bend in X-Y, even joints in X-Z), so every
+// block is THIN (20 mm) along the axis of the joint at its far end and
+// THICK (26 mm) in that joint's bending plane. A joint's pivot = the shaft
+// of the block before it: centred in its thickness, MOTOR_SHAFT_FROM_END_MM
+// in from its far end. With these numbers neighbouring blocks only touch
+// past ~110 deg of bend (the joint limit is 105) - the old 36 x 36 boxes
+// with the pivot on a box face overlapped from ~13 deg.
+// Scale: 1 mm = LINK_UNITS_PER_MM scene units (block length stays 52).
+final float MOTOR_LENGTH_MM = 34;
+final float MOTOR_THICK_MM = 26;            // in the bending plane of the joint at its far end
+final float MOTOR_THIN_MM = 20;             // along that joint's axis
+final float MOTOR_SHAFT_FROM_END_MM = 10.5; // shaft centre to the body's far end face
+final float MOTOR_GAP_MM = 8;               // gap between neighbouring bodies (bridge)
+final float LINK_UNITS_PER_MM = 52.0 / MOTOR_LENGTH_MM;
+
+final float LINK_WIDTH = MOTOR_LENGTH_MM * LINK_UNITS_PER_MM;          // block length along the chain
+final float LINK_THICK = MOTOR_THICK_MM * LINK_UNITS_PER_MM;
+final float LINK_THIN = MOTOR_THIN_MM * LINK_UNITS_PER_MM;
+final float LINK_SHAFT_FROM_END = MOTOR_SHAFT_FROM_END_MM * LINK_UNITS_PER_MM;
+final float LINK_GAP = MOTOR_GAP_MM * LINK_UNITS_PER_MM;
+// Pivot -> centre of the block it drives (along the block's own axis), and
+// pivot -> next pivot. The block centre sits ON the hinge axis line (no
+// sideways offset), like the real shaft centred in the motor body.
+final float LINK_BOX_CENTER_X = LINK_SHAFT_FROM_END + LINK_GAP + LINK_WIDTH / 2.0;
+final float LINK_STEP = LINK_WIDTH + LINK_GAP;
+final float LINK_AXIS_OFFSET = 0;
+final float LINK_HEIGHT = LINK_THICK;       // generic size for the fixed end blocks / mount
 final PVector CHAIN_ORIGIN = new PVector(1050, 360, -100);
 
 // Which hardware Dynamixel IDs are physically mounted mirrored (their
@@ -234,16 +249,31 @@ String ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 String ANTHROPIC_MODEL   = "claude-opus-5"; // more capable spatial reasoning than Sonnet, costs more per call
 String ANTHROPIC_API_KEY; // loaded in setup() - see loadApiKey()
 
-// How far a single joint may bend off its 180 deg neutral. Was capped at 90,
-// well inside the arm's actual mechanical safety range (sliders are allowed
-// 60-310, i.e. up to +/-120-130 off neutral elsewhere in this file) - that
-// unused headroom meant tight curvature (a loop closing back on itself, a
-// wave's peaks/troughs) couldn't be reached: the solver would clamp several
-// joints in a row right at the boundary and the achievable curve would fall
-// short instead of completing the bend. Raised to match the tighter of the
-// two real bounds (310-180=130, 180-60=120) so the solver can use nearly all
-// of the same range that was already established as safe.
-float AI_MAX_TURN_DEG = 120;
+// ---- JOINT RANGE (2026-11-16) ----
+//   INTERNAL angles (everything in this sketch, the AI solver, the shape
+//   library, the serial protocol): 180 = straight.
+//   DISPLAYED angles (bar readouts, chat notes for you): internal - 90,
+//   i.e. 90 = straight, normal travel 0..180.
+// Commands (bars, Create Shape, presets, animations, holding a hand pose)
+// may use the normal +/-90 PLUS JOINT_EXTRA_DEG of extra travel some motors
+// have: displayed -15..195 = internal 75..285. The firmware clamps again.
+// Readings are NEVER clamped: a joint pushed past a limit by hand shows its
+// true angle (bar pinned at the end, readout in red).
+final float JOINT_EXTRA_DEG = 15;                      // beyond 0 / 180 displayed
+final float JOINT_MIN_DEG = 90 - JOINT_EXTRA_DEG;      // = displayed -15
+final float JOINT_MAX_DEG = 270 + JOINT_EXTRA_DEG;     // = displayed 195
+final float JOINT_NEUTRAL_DEG = 180;                   // = displayed 90 (straight)
+final float DISPLAY_OFFSET_DEG = 90;
+float toDisplayDeg(float internalDeg) { return internalDeg - DISPLAY_OFFSET_DEG; }
+float clampJoint(float internalDeg) { return constrain(internalDeg, JOINT_MIN_DEG, JOINT_MAX_DEG); }
+String jointRangeText() { return round(toDisplayDeg(JOINT_MIN_DEG)) + " to " + round(toDisplayDeg(JOINT_MAX_DEG)) + "\u00B0"; }
+
+// How far the AI may bend a joint off its 180 deg neutral. Kept at the
+// NORMAL +/-90 (displayed 0..180), not the extra +/-15: only SOME motors
+// can go further, so AI shapes / animations stay in the range every motor
+// has. Raise to 90 + JOINT_EXTRA_DEG if all of this arm's motors can.
+float AI_MAX_TURN_DEG = 90;
+float clampAI(float internalDeg) { return constrain(internalDeg, 180 - AI_MAX_TURN_DEG, 180 + AI_MAX_TURN_DEG); }
 
 // ---- AI shape preview overlay ----
 // The AI's ideal spline curve, rescaled and recentered onto the achievable
@@ -259,7 +289,7 @@ boolean aiHasPreview = false;
 // a clear reference for exactly where each bend happens, independent of
 // whatever shape/overlay is currently showing. Purely visual: changing this
 // never touches a servo angle or the segment DSL.
-boolean showHingeMarkers = true;
+boolean showHingeMarkers = false; // markers removed - stiffness is set with each row's STIFF bar
 
 // Fine-tune offset for the hinge markers, in the same units as LINK_GAP/
 // LINK_WIDTH/LINK_HINGE/LINK_HEIGHT. drawlineform3d.pde's joint loop was
@@ -293,11 +323,10 @@ float HINGE_CLICK_RADIUS = 18; // pixels - how close a tap must land; rescaled i
 // Position P Gain ("stiffness") presets instead of toggling torque - each
 // tap feels softer, wrapping back to full stiffness after the last level.
 // Index = position (1-11) - 1, i.e. hingeStiffnessLevel[0] is motor/hinge
-// 2's level. STIFFNESS_P_GAIN_DISPLAY is for the HUD/console only - the
-// Arduino firmware owns the real lookup table (STIFFNESS_P_GAINS in the
-// .ino) and these two arrays have to be kept in sync by hand.
+// 2's level. The P gain behind each level lives ONLY in the firmware and
+// is set per arm (STIFFNESS_P_GAINS_LIST / P_GAIN_PCT_LIST in
+// local_config.h), since it depends on the motor model.
 final int NUM_STIFFNESS_LEVELS = 4;
-final int[] STIFFNESS_P_GAIN_DISPLAY = {1200, 700, 350, 120};
 final byte STIFFNESS_HEADER = (byte) 252;
 int[] hingeStiffnessLevel = new int[MOTOR_COUNT]; // all start at level 0 = firmware's default P gain
 
@@ -703,14 +732,13 @@ void layoutResponsiveGUI() {
     float y = ROW_START_Y + i * ROW_STEP;
     positionControl("Motor " + id, SLIDER_X, y, SLIDER_W, SLIDER_H);
     positionControl("Torque Level " + id, SLIDER_X, y, SLIDER_W, SLIDER_H);
-    positionControl("View " + id, TOGGLE_X, y, TOGGLE_W, TOGGLE_H);
+    positionControl("Stiffness " + id, SLIDER_X, y, SLIDER_W, SLIDER_H);
     positionControl("Power " + id, POWER_X, y, POWER_W, TOGGLE_H);
   }
   int buttonY = ROW_START_Y + MOTOR_COUNT * ROW_STEP + 20;
   positionControl("Create Shape", SLIDER_X, buttonY, 130, 60);
   positionControl("Reset", SLIDER_X + 190, buttonY, 130, 60);
   positionControl("Shape Size", SLIDER_X, buttonY + 80, 250, 22);
-  positionControl("Show Hinges", SLIDER_X, buttonY + 80, 100, 20);
 
   positionControl("Save Shape", SLIDER_X, buttonY + 118, 150, 36);
   positionControl("Stop Animation", SLIDER_X + 170, buttonY + 118, 150, 36);
@@ -745,7 +773,6 @@ void layoutResponsiveGUI() {
     if (button != null) button.getCaptionLabel().setFont(buttonFont);
   }
   cp5.getController("Shape Size").getCaptionLabel().setFont(motorFont);
-  cp5.getController("Show Hinges").getCaptionLabel().setFont(motorFont);
   if (chatInput != null) chatInput.setFont(uiFont(promptFontSize));
   updatingShapeControls = false;
 }
@@ -856,20 +883,16 @@ void setup() {
     cp5.addSlider("Motor " + dxlId)
       .setLabel("Motor " + displayId(dxlId)) // 1 = base ... 11 = tip
       .setPosition(SLIDER_X, rowY)
-      .setRange(0, 360) // Safety boundaries slightly inside the 0-360 loop
+      .setRange(JOINT_MIN_DEG, JOINT_MAX_DEG) // straight +/-105, shown as -15..195 (see toDisplayDeg)
       .setValue(180.0)      // Starts right at your neutral 180° center
       .setSize(SLIDER_W, SLIDER_H)
       .getValueLabel()
       .setSize(11);
 
-    // Per-motor switch: ON = ANGLE slider (live), OFF = TORQUE slider (see Motors.pde)
+    // Per-row bars on the same spot: ANGLE (above), TORQUE and STIFFNESS -
+    // the row's 3-way selector (Motors.pde, motorsDrawViewSelectors) shows one.
     motorsAddTorqueSlider(dxlId, SLIDER_X, rowY);
-    Toggle t = cp5.addToggle("View " + dxlId)
-      .setPosition(TOGGLE_X, rowY)
-      .setSize(TOGGLE_W, TOGGLE_H)
-      .setValue(true)
-      .setMode(ControlP5.SWITCH);
-    t.setLabelVisible(false);
+    motorsAddStiffnessSlider(dxlId, SLIDER_X, rowY);
 
     // Torque ON/OFF switch (like the backup): OFF = limp, ON = holding.
     cp5.addToggle("Power " + dxlId)
@@ -878,18 +901,6 @@ void setup() {
       .setValue(true)
       .setMode(ControlP5.SWITCH)
       .setLabelVisible(false);
-
-    if (position == 1) toggle1 = t;
-    else if (position == 2) toggle2 = t;
-    else if (position == 3) toggle3 = t;
-    else if (position == 4) toggle4 = t;
-    else if (position == 5) toggle5 = t;
-    else if (position == 6) toggle6 = t;
-    else if (position == 7) toggle7 = t;
-    else if (position == 8) toggle8 = t;
-    else if (position == 9) toggle9 = t;
-    else if (position == 10) toggle10 = t;
-    else if (position == 11) toggle11 = t;
   }
 
   int belowRowsY = ROW_START_Y + MOTOR_COUNT * ROW_STEP + 20; // 436
@@ -926,18 +937,9 @@ void setup() {
   cp5.getController("Shape Size").setLock(true);
   cp5.getController("Shape Size").setVisible(false); // removed from the GUI
 
-  // Pure visual aid for hand-designing a shape on the sliders: marks each
-  // active joint's real pivot point (not the box center) in the 3D view, so
-  // it's obvious exactly where a bend happens. On by default; off removes
-  // all clutter from the viewport with one click. Read directly off this
-  // toggle's value in drawlineform3d() - no controlEvent() wiring needed
-  // since nothing else depends on the moment it changes.
-  cp5.addToggle("Show Hinges")
-    .setPosition(SLIDER_X, buttonY + buttonH + 20 + 32)
-    .setSize(100, 20)
-    .setValue(showHingeMarkers)
-    .setMode(ControlP5.SWITCH)
-    .getCaptionLabel().setSize(11);
+  // (The "Show Hinges" switch and the clickable hinge markers in the 3D
+  // view were removed 2026-11-16: stiffness is now set per row with the
+  // ANGLE | TORQUE | STIFF selector - see Motors.pde.)
 
   // Captures whatever's on the sliders RIGHT NOW into shape_library.json
   // under whatever name is currently typed in the AI Prompt box above -
@@ -974,12 +976,9 @@ void draw() {
   // Don't let dragging inside the GUI panel (sliders, buttons, prompt box)
   // also orbit the camera - PeasyCam only knows about raw mouse events, not
   // that ControlP5 controls are logically "on top" of the 3D scene.
-  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver());
+  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver());
 
-  // Read the "Show Hinges" switch straight off its control each frame -
-  // same pattern as the torque toggles below, no controlEvent() wiring
-  // needed since drawlineform3d() just wants this frame's current value.
-  showHingeMarkers = cp5.get(Toggle.class, "Show Hinges").getBooleanValue();
+  motorsSyncStiffnessSliders(); // stiffness bars follow levels changed elsewhere (Motors.pde)
 
   // Advance the ANIMATE player (if one is running) BEFORE drawlineform3d()
   // reads the Motor sliders - so the 3D view this exact frame already
@@ -1011,27 +1010,22 @@ void draw() {
   textAlign(CENTER, CENTER);
   hudTextSize(15);
 
-  // Torque switch ON/OFF labels, one per motor row - positioned just to the
-  // right of each toggle switch (not on top of it) using the same layout
-  // constants setup() built the rows with, so they can never drift apart.
-  Toggle[] allToggles = {
-    toggle1, toggle2, toggle3, toggle4, toggle5, toggle6,
-    toggle7, toggle8, toggle9, toggle10, toggle11
-  };
+  // Per row: the ANGLE | TORQUE | STIFF selector (Motors.pde) and the
+  // torque ON/OFF label next to its switch - same layout constants setup()
+  // built the rows with, so they can never drift apart.
+  if (!manipulationMode) motorsDrawViewSelectors();
+  textFont(hudFont);
+  hudTextSize(15);
   textAlign(LEFT, CENTER);
-  int toggleLabelX = TOGGLE_X + TOGGLE_W + 10;
-  for (int i = 0; i < allToggles.length; i++) {
+  for (int i = 0; i < MOTOR_COUNT; i++) {
     int rowY = ROW_START_Y + i * ROW_STEP;
     int labelY = rowY + TOGGLE_H / 2;
     if (manipulationMode) {
-      // switches are hidden: one label per row instead
+      // selector and switches are hidden: one label per row instead
       fill(rowActive(i + 2) ? MANIP_ACCENT : THEME_MUTED);
       hudText(rowActive(i + 2) ? "FREE - torque OFF" : "not fitted", TOGGLE_X, labelY);
       continue;
     }
-    boolean angle = allToggles[i].getBooleanValue();
-    fill(angle ? THEME_CYAN : THEME_ORANGE);
-    hudText(angle ? "ANGLE" : "TORQUE", toggleLabelX, labelY);
     boolean on = motorPowerOn(i);
     fill(on ? THEME_TEXT : THEME_ORANGE);
     hudText(on ? "ON" : "OFF", POWER_X + POWER_W + 8, labelY);
@@ -1043,6 +1037,8 @@ void draw() {
 
   // ControlP5 controls are already positioned in physical pixel coordinates.
   cp5.draw();
+  motorsDrawAngleReadouts(); // angle numbers on the ANGLE bars (Motors.pde)
+  motorsDrawStiffOverlay();  // level names on the STIFF bars (Motors.pde)
   motorsDrawLoadOverlay(); // live torque use on the TORQUE sliders
   if (!serialConnected()) {
     fill(255, 200, 80);
@@ -1054,18 +1050,10 @@ void draw() {
   cam.endHUD();
 }
 
-// Records a click as a possible hinge tap, as long as it didn't land on
-// the ControlP5 panel (that's already handled by ControlP5/controlEvent()
-// - same gate PeasyCam itself uses via cam.setActive() in draw() above).
-// The actual hit-test happens inside drawlineform3d(), not here - see the
-// comment on hingeClickPending above for why.
+// Clicks on the hand-drawn controls (ControlP5 handles its own).
 void mousePressed() {
-  if (modesMousePressed()) return; // AI / manipulation switch (Modes.pde)
-  if (!cp5.isMouseOver() && !chatMouseOver() && !manipulationMode) { // no stiffness taps while limp
-    hingeClickPending = true;
-    hingeClickX = mouseX;
-    hingeClickY = mouseY;
-  }
+  if (modesMousePressed()) return;      // AI / manipulation switch (Modes.pde)
+  if (motorsViewMousePressed()) return; // per-row ANGLE | TORQUE | STIFF selector (Motors.pde)
 }
 
 // Live calibration for the hinge markers (see hingeOffsetX/Y/Z above):
@@ -1146,8 +1134,8 @@ synchronized void aiSendSlidersOverSerial() {
   int[] frame = new int[1 + MOTOR_COUNT];
   frame[0] = 255;
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    targets[i] = constrain(aiAnimating ? cp5.getController("Motor " + (i + 2)).getValue() : motorTargetDeg(i), 50, 310);
-    frame[1 + i] = int(map(targets[i], 0, 360, 0, 250));
+    targets[i] = constrain(aiAnimating ? cp5.getController("Motor " + (i + 2)).getValue() : motorTargetDeg(i), JOINT_MIN_DEG, JOINT_MAX_DEG);
+    frame[1 + i] = round(map(targets[i], 0, 360, 0, 250));
   }
   sendSerialBytes(frame);
   motorsNoteSentAll(targets);
@@ -1263,6 +1251,9 @@ if (name.equals("Reset")) {
   // aiUpdateAnimation() just overwrites everything this button is about to
   // set, and the arm would keep ping-ponging right through "Reset".
   aiStopAnimation();
+  // Full stiffness again for every joint (undoes hinge taps and the twitch
+  // safety net's softening - Motors.pde). Only changed joints are sent.
+  aiApplyStiffnessLevels(new int[MOTOR_COUNT]);
 
   // Snap the camera back to its original framing too, not just the motor
   // angles - otherwise the arm returns to its neutral straight pose but
@@ -1334,7 +1325,7 @@ if (name.equals("Reset")) {
   // and they overloaded: red LED, torque off. It also shifted the rest of
   // the frame, so some motors never got 180 at all.)
   if (serialConnected()) {
-    int neutralAngle = int(map(180, 0, 360, 0, 250));
+    int neutralAngle = round(map(180, 0, 360, 0, 250));
     int[] frame = new int[1 + MOTOR_COUNT];
     frame[0] = 255;
     for (int i = 1; i <= MOTOR_COUNT; i++) frame[i] = neutralAngle;
@@ -2256,8 +2247,8 @@ void aiUpdateAnimation() {
     // re-aiming instead of looking parked in one spot.
     float driftPhase = (now - aiAnimLoopStartMillis) / AI_ANIM_WAVE_DRIFT_PERIOD_MS;
     float drift = AI_ANIM_WAVE_DRIFT_DEG * sin(TWO_PI * driftPhase);
-    sampled[0] = constrain(sampled[0] + drift, 60, 310);
-    sampled[1] = constrain(sampled[1] + drift * 0.6, 60, 310);
+    sampled[0] = clampAI(sampled[0] + drift);
+    sampled[1] = clampAI(sampled[1] + drift * 0.6);
 
     aiAnimIndex = 0; // not meaningful in wave mode - HUD text ignores it
 
@@ -2796,7 +2787,7 @@ void aiGenerateFromSegments(JSONArray segments, boolean closed, String shapeName
   for (int j = 0; j < MOTOR_COUNT; j++) {
     float jointErr = PVector.dist(achievableFinal.get(j + 1), jointTargets.get(j));
     aiLastJointError[j] = jointErr;
-    aiLastJointSaturated[j] = (angles[j] <= 60.5 || angles[j] >= 309.5);
+    aiLastJointSaturated[j] = (angles[j] <= 180 - AI_MAX_TURN_DEG + 0.5 || angles[j] >= 180 + AI_MAX_TURN_DEG - 0.5);
     if (jointErr > worstJointError) {
       worstJointError = jointErr;
       aiLastWorstJoint = j + 1;
@@ -3557,7 +3548,7 @@ float[] aiSampleAnimationLoop(ArrayList<float[]> poses, float u, float tension) 
 // joints (a spatial wave); as phase increases, the whole pattern slides
 // along the joint axis, which is exactly what a wave traveling down a
 // body looks like. Clamped to the same mechanical safety limits used
-// everywhere else motor angles get set directly (60-310), since this
+// everywhere else motor angles get set directly (JOINT_MIN_DEG..JOINT_MAX_DEG), since this
 // bypasses aiGenerateFromSegments()'s own clamp entirely.
 float[] aiSampleTravelingWave(float amplitudeDeg, float wavelengthJoints, float phase, float direction) {
   float[] result = new float[MOTOR_COUNT];
@@ -3565,7 +3556,7 @@ float[] aiSampleTravelingWave(float amplitudeDeg, float wavelengthJoints, float 
     float jointPos = i + 1; // 1..11, matching the hardware/HUD numbering convention used everywhere else
     float theta = TWO_PI * (jointPos / wavelengthJoints - direction * phase);
     float angle = 180 + amplitudeDeg * sin(theta);
-    result[i] = constrain(angle, 60, 310);
+    result[i] = clampAI(angle);
   }
   return result;
 }
@@ -4340,12 +4331,12 @@ ArrayList<PVector> aiComputeAchievableCurve(float[] angles) {
 
   pts.add(pos.copy());
 
-  float boxOffsetX = LINK_GAP + LINK_WIDTH / 2.0 + (LINK_WIDTH - LINK_HINGE);
+  float boxOffsetX = LINK_BOX_CENTER_X;
 
   for (int i = 0; i < angles.length; i++) {
     int motorNumber = i + 1;
     int dxlId = motorNumber + 1;
-    float safeAngle = constrain(angles[i], 60, 300);
+    float safeAngle = clampJoint(angles[i]);
     float angle = safeAngle - 180;
 
     boolean mirrored = aiIsMirroredMotor(dxlId);
@@ -4373,11 +4364,11 @@ ArrayList<PVector> aiComputeAchievableCurve(float[] angles) {
 
     PVector boxCenter = PVector.add(pos, PVector.add(
       PVector.mult(right, boxOffsetX),
-      PVector.mult(forward, LINK_HEIGHT / 2.0)
+      PVector.mult(forward, LINK_AXIS_OFFSET)
     ));
     pts.add(boxCenter);
 
-    pos = PVector.add(pos, PVector.mult(right, LINK_HINGE + LINK_GAP));
+    pos = PVector.add(pos, PVector.mult(right, LINK_STEP));
   }
 
   return pts;
@@ -4483,8 +4474,8 @@ float[] aiSolveAnglesForCurve(ArrayList<PVector> targetPoints, int numMotors) {
   PVector up      = new PVector(0, 1, 0);
   PVector forward = new PVector(0, 0, 1);
 
-  float boxOffsetX = LINK_GAP + LINK_WIDTH / 2.0 + (LINK_WIDTH - LINK_HINGE);
-  float halfHeight = LINK_HEIGHT / 2.0;
+  float boxOffsetX = LINK_BOX_CENTER_X;
+  float halfHeight = LINK_AXIS_OFFSET; // 0: block centres sit on the hinge axis
 
   for (int i = 0; i < numMotors; i++) {
     int motorNumber = i + 1;
@@ -4522,13 +4513,13 @@ float[] aiSolveAnglesForCurve(ArrayList<PVector> targetPoints, int numMotors) {
     float angleAfterMirror = degrees(rad);
     float angleBeforeMirror = mirrored ? -angleAfterMirror : angleAfterMirror;
     angleBeforeMirror = constrain(angleBeforeMirror, -AI_MAX_TURN_DEG, AI_MAX_TURN_DEG);
-    float motorAngle = constrain(180 + angleBeforeMirror, 60, 310);
+    float motorAngle = clampAI(180 + angleBeforeMirror);
     outAngles[i] = motorAngle;
 
     // Advance the chain using the FINAL (possibly clamped) angle, so the
     // next joint solves against where the arm will really be - not the
     // unclamped ideal.
-    float safeAngle = constrain(motorAngle, 60, 300);
+    float safeAngle = clampAI(motorAngle);
     float angle = safeAngle - 180;
     if (mirrored) angle = -angle;
     float finalRad = radians(angle);
@@ -4549,7 +4540,7 @@ float[] aiSolveAnglesForCurve(ArrayList<PVector> targetPoints, int numMotors) {
       forward = newForward;
     }
 
-    pos = PVector.add(pos, PVector.mult(right, LINK_HINGE + LINK_GAP));
+    pos = PVector.add(pos, PVector.mult(right, LINK_STEP));
   }
 
   return outAngles;
@@ -4641,7 +4632,7 @@ ArrayList<PVector> aiFabrikSolvePositions(
 float[] aiFabrikRefineAnglesForCurve(
   PVector base, ArrayList<PVector> targets, int numMotors, int outerIterations
 ) {
-  float linkStep = LINK_HINGE + LINK_GAP;
+  float linkStep = LINK_STEP;
 
   ArrayList<PVector> currentPositions = new ArrayList<PVector>();
   for (PVector t : targets) currentPositions.add(t.copy());

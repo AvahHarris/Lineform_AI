@@ -704,7 +704,7 @@ void motionRunTurn(String userText) {
     for (int i = 0; i < MOTOR_COUNT; i++) {
       sb.append(i == 0 ? "" : ", ").append(round(cp5.getController("Motor " + (i + 2)).getValue()));
     }
-    angles = "\n[Current joint angles, base to tip (180 = straight): [" + sb + "]]";
+    angles = "\n[Current joint angles, base to tip (180 = straight; each joint can only reach 90-270, i.e. +/-90 from straight, for AI shapes): [" + sb + "]]";
   }
 
   JSONArray content = new JSONArray();
@@ -890,7 +890,7 @@ String chatStateNote() {
     }
     if (changed) {
       hand = "; the user has hand-adjusted the sliders since, and the joint angles are now ["
-        + sb + "] (degrees, base to tip, 180 = straight)";
+        + sb + "] (degrees, base to tip, 180 = straight, each joint limited to 90-270)";
     }
   }
   return "\n\n[Arm right now: " + state + hand + motorsTorqueNote() + ".]";

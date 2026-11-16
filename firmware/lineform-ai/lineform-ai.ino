@@ -49,10 +49,6 @@ const byte FRAME_START_2 = 0x5A;
 
 const float PROTOCOL_VERSION = 2.0;
 
-// Position P Gain for each stiffness level (0 = stiffest). Lower values
-// feel softer; higher values feel stiffer and respond more aggressively.
-const uint16_t STIFFNESS_P_GAINS[4] = {1200, 700, 350, 120};
-
 // Torque limit. The motors run in CURRENT-BASED POSITION mode, so each
 // motor's Goal Current caps how hard it can push. 100% = the motor's own
 // Current Limit (read from the motor at startup, never written), so full
@@ -84,6 +80,17 @@ const uint8_t DXL_IDS[NUM_MOTORS] = {
 #ifndef REVERSED_MOTORS_LIST
   #define REVERSED_MOTORS_LIST
 #endif
+
+// Position P Gain for each stiffness level (0 = stiffest, used for normal
+// holding; 1-3 = softer, used by hinge taps / animations / the GUI's twitch
+// safety net). Lower = softer; higher = stiffer and more aggressive.
+// Per arm (motor model!): override in local_config.h with
+//   #define STIFFNESS_P_GAINS_LIST  1200, 700, 350, 120
+// and scale single motors with P_GAIN_PCT_LIST (below).
+#ifndef STIFFNESS_P_GAINS_LIST
+  #define STIFFNESS_P_GAINS_LIST 1200, 700, 350, 120
+#endif
+const uint16_t STIFFNESS_P_GAINS[4] = { STIFFNESS_P_GAINS_LIST };
 // How many motors this arm really has (the first ACTIVE_MOTORS entries of
 // DXL_IDS, base -> tip). The serial protocol always carries NUM_MOTORS
 // slots so the same GUI works on every arm; slots past ACTIVE_MOTORS are
@@ -121,6 +128,31 @@ const float ANGLE_OFFSETS[NUM_MOTORS] = { ANGLE_OFFSETS_DEG }; // missing entrie
 #ifndef DROOP_I_GAIN
   #define DROOP_I_GAIN 150
 #endif
+// JOINT RANGE: +/-105 deg off the straight pose - the normal +/-90 plus 15
+// deg of extra travel some motors have. In the GUI-frame degrees used by
+// this protocol (180 = straight) that is 75..285 - the GUI SHOWS it as
+// -15..195 with 90 = straight. Every goal is clamped to this; readings are
+// not (so the GUI can show a joint pushed past a limit at its true angle).
+// Must match JOINT_MIN_DEG / JOINT_MAX_DEG in Gui_3_0.pde.
+const float JOINT_MIN_DEG = 75;
+const float JOINT_MAX_DEG = 285;
+
+// Per-motor stiffness scale, % of the STIFFNESS_P_GAINS level, by GUI motor
+// number (1 = base ... 11 = tip). 0 or missing = 100%. For motors that
+// oscillate ("twitch") at the shared gain - e.g. XL330-M077 (low gear ratio,
+// factory P gain 400) under changing load. Set in local_config.h:
+//   #define P_GAIN_PCT_LIST  100, 100, 100, 100, 100, 50, 50
+#ifndef P_GAIN_PCT_LIST
+  #define P_GAIN_PCT_LIST 100
+#endif
+const uint8_t P_GAIN_PCT[NUM_MOTORS] = { P_GAIN_PCT_LIST };
+
+uint16_t pGainFor(int i, int level) {
+  uint16_t pct = P_GAIN_PCT[i] == 0 ? 100 : P_GAIN_PCT[i];
+  uint32_t g = (uint32_t)STIFFNESS_P_GAINS[level] * pct / 100;
+  return (uint16_t)(g < 1 ? 1 : g);
+}
+
 // Leading 0 is a placeholder (not a motor number) so the array is never empty.
 const uint8_t REVERSED_MOTORS[] = { 0, REVERSED_MOTORS_LIST };
 
@@ -293,6 +325,9 @@ void enableMotor(int i) {
 // on. Writing the goal before torque-on means the motor never drives back
 // to an old goal from before it was moved by hand. If the position can't be
 // read at all, the goal is left alone rather than guessed.
+float rawToDegrees(uint8_t id, int32_t rawPosition); // defined further down
+int32_t guiDegToRaw(uint8_t id, float degrees);
+
 void holdHere(int i) {
   uint8_t id = DXL_IDS[i];
   if (dxl.readControlTableItem(ControlTableItem::HARDWARE_ERROR_STATUS, id) != 0) {
@@ -310,7 +345,12 @@ void holdHere(int i) {
     motorLastGoodRaw[i] = raw;
     motorHaveGoodRaw[i] = true;
     motorTurnBase[i] = turnBaseOf(raw);
-    dxl.setGoalPosition(id, raw); // raw units (library default)
+    // Hold exactly here - unless the joint was pushed past a limit by hand:
+    // then hold AT the limit (straight +/-90).
+    int32_t goal = raw;
+    float deg = rawToDegrees(id, raw);
+    if (deg < JOINT_MIN_DEG || deg > JOINT_MAX_DEG) goal = motorTurnBase[i] + guiDegToRaw(id, deg);
+    dxl.setGoalPosition(id, goal); // raw units (library default)
   }
   enableMotor(i); // gains, profile, torque on, torque limit
 }
@@ -412,13 +452,23 @@ void sendDegrees(uint8_t id, int32_t rawPosition) {
   DEBUG_SERIAL.write(encoded & 0xFF);
 }
 
-int32_t angleByteToRaw(uint8_t id, int compressedAngle) {
-  float degrees = map(compressedAngle, 0, 250, 0, 360);
-  degrees = constrain(degrees, 60, 310);
+// GUI-frame degrees (180 = straight) -> raw position within one turn.
+// Clamped to the joint range JOINT_MIN_DEG..JOINT_MAX_DEG (straight +/-90).
+int32_t guiDegToRaw(uint8_t id, float degrees) {
+  degrees = constrain(degrees, JOINT_MIN_DEG, JOINT_MAX_DEG);
   degrees += angleOffsetOf(id);                   // per-motor correction
   if (isReversed(id)) degrees = 360.0 - degrees; // flip motors mounted the other way
-  int32_t raw = (degrees / 360.0) * 4095;
-  return constrain(raw, 683, 3526);
+  int32_t raw = (int32_t)(degrees / 360.0 * 4095 + 0.5);
+  // Last-resort guard in the motor's OWN frame (after offset + reversal):
+  // 10..350 deg, i.e. never across 0/360. (Was 60..310, which with motor 3's
+  // +40 deg offset would have silently capped it near the old limit.)
+  return constrain(raw, 114, 3981);
+}
+
+int32_t angleByteToRaw(uint8_t id, int compressedAngle) {
+  // Float math: Arduino's map() is integer-only and always rounded DOWN
+  // (up to 1.44 deg low on every command).
+  return guiDegToRaw(id, compressedAngle * 360.0 / 250.0);
 }
 
 // Goal for chain index i, placed in the turn that motor is currently in.
@@ -469,7 +519,7 @@ void setup() {
   // Configure all motors: current-based position mode (position control
   // with a torque limit), full stiffness, 100% torque.
   for (int i = 0; i < NUM_MOTORS; i++) {
-    motorPGain[i] = STIFFNESS_P_GAINS[0];
+    motorPGain[i] = pGainFor(i, 0);
     motorIGain[i] = DROOP_I_GAIN;
     motorTorquePercent[i] = 100;
     motorTurnBase[i] = 0;
@@ -676,7 +726,7 @@ void handleCommand(byte header, const byte d[]) {
     int level = constrain(d[1], 0, 3);
     int i = indexForId(dxlId);
     if (i >= 0) {
-      motorPGain[i] = STIFFNESS_P_GAINS[level];
+      motorPGain[i] = pGainFor(i, level);
       motorIGain[i] = (level == 0) ? DROOP_I_GAIN : 0; // softer levels: no I term
       dxl.writeControlTableItem(ControlTableItem::POSITION_I_GAIN, dxlId, motorIGain[i]);
       dxl.writeControlTableItem(ControlTableItem::POSITION_P_GAIN, dxlId, motorPGain[i]); // RAM item - fine with torque on

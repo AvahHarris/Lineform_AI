@@ -22,7 +22,7 @@ void generateShapeAngles() {
   int n = min(MOTOR_COUNT, min(small.length, large.length));
   for (int i = 0; i < n; i++) {
     // Same safe range the rest of the sketch uses for the real servos.
-    generatedAngles[i] = constrain(lerp(small[i], large[i], t), 60, 310);
+    generatedAngles[i] = clampJoint(lerp(small[i], large[i], t));
   }
 }
 

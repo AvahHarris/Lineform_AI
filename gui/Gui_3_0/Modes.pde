@@ -173,6 +173,7 @@ void modeExitManipulation() {
   float[] here = readAllMotorValues(READ_ALL_HEADER, 100.0);
   long now = millis();
   int held = 0, limp = 0;
+  String pastLimit = "";
   for (int i = 0; i < MOTOR_COUNT; i++) {
     int rowId = i + 2;
     if (!rowActive(rowId)) continue;
@@ -184,7 +185,9 @@ void modeExitManipulation() {
 
     // This pose is now the motor's goal - exactly like right after a sent goal,
     // so the AI-mode hold logic (settle, rest baseline, push detection) restarts.
-    motorLastSentDeg[i] = deg;
+    // (Clamped: a joint left past 0/180 is pulled back to the limit - the
+    // firmware's HOLD_HERE does the same.)
+    motorLastSentDeg[i] = clampJoint(deg);
     motorLastSendMs[i] = now;
     motorReachedGoal[i] = false;
     motorRestBaseline[i] = Float.NaN;
@@ -201,9 +204,9 @@ void modeExitManipulation() {
     } else {
       limp++;
     }
-    if (deg < 60 || deg > 310) {
-      println("Note: motor " + displayId(rowId) + " was left at " + nf(deg, 1, 1)
-        + " deg - outside the 60-310 range Create Shape / the bars can command.");
+    if (hold && (deg < JOINT_MIN_DEG - 0.5 || deg > JOINT_MAX_DEG + 0.5)) {
+      pastLimit += (pastLimit.length() == 0 ? "" : ", ") + "motor " + displayId(rowId) + " ("
+        + nf(toDisplayDeg(deg), 1, 1) + "\u00B0 -> " + round(toDisplayDeg(clampJoint(deg))) + "\u00B0)";
     }
   }
   if (here != null) motorActualMs = now;
@@ -212,6 +215,11 @@ void modeExitManipulation() {
   themeApplyMode();
   println("AI MODE: " + held + " motors holding the hand-posed angles" + (limp > 0 ? ", " + limp + " left limp (OFF / 0%)" : "") + ".");
   chatAdd("status", "AI mode: the arm holds the pose you made" + (limp > 0 ? " (" + limp + " motor(s) stay limp - switched OFF or at 0% torque)" : "") + ".");
+  if (pastLimit.length() > 0) {
+    String m = "Moved back inside the " + jointRangeText() + " range: " + pastLimit + ".";
+    println(m);
+    chatAdd("status", m);
+  }
   if (serialConnected()) motorsDiagDueMs = millis() + 1500; // re-check torque state once things settle
 }
 
@@ -222,16 +230,16 @@ void modesApplyControls() {
     int id = i + 2;
     Controller a = cp5.getController("Motor " + id);
     if (a != null) a.setLock(m);
-    Controller v = cp5.getController("View " + id);
-    if (v != null) v.setVisible(!m);
     Controller p = cp5.getController("Power " + id);
     if (p != null) p.setVisible(!m);
     if (m) {
       if (a != null) a.setVisible(true);  // every row shows its angle bar
       Controller t = cp5.getController("Torque Level " + id);
       if (t != null) t.setVisible(false);
+      Controller st = cp5.getController("Stiffness " + id);
+      if (st != null) st.setVisible(false);
     } else {
-      motorsApplyView(id);                // back to each row's ANGLE / TORQUE choice
+      motorsApplyView(id);                // back to each row's ANGLE / TORQUE / STIFF choice
     }
   }
   // Create Shape / Reset, and the whole AI chat panel's controls.

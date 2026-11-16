@@ -23,5 +23,17 @@
 // no effect). Try this if motors keep tripping the overload error.
 // #define USE_PLAIN_POSITION_MODE
 
+// ---- Stiffness (depends on the motor model - set it for YOUR arm) ----
+// Position P Gain per stiffness level: 0 = normal holding, 1-3 = softer
+// (hinge taps, animations, the GUI's twitch safety net). Default below.
+// Low-gear-ratio motors (e.g. XL330-M077, factory P 400) may twitch at 1200;
+// higher-gear-ratio ones (e.g. XL330-M288) tolerate more.
+// #define STIFFNESS_P_GAINS_LIST  1200, 700, 350, 120
+
 // Position I Gain (removes gravity droop; 0 = off). Default 150; lower if motors twitch.
 // #define DROOP_I_GAIN  150
+
+// Per-motor stiffness, % of the shared Position P Gain (1200 at full
+// stiffness), by motor number 1..11. Missing entries / 0 = 100%. Lower it for
+// motors that oscillate ("twitch") - e.g. XL330-M077 (factory P gain 400).
+// #define P_GAIN_PCT_LIST  100, 100, 100, 100, 100, 50, 50

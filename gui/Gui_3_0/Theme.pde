@@ -111,12 +111,13 @@ void applyTheme() {
       s.setColorCaptionLabel(THEME_TEXT);
       s.setColorValueLabel(color(255));
     }
-    // ANGLE / TORQUE switches: cyan knob = ANGLE, dark = TORQUE
-    Controller t = cp5.getController("View " + id);
-    if (t != null) {
-      t.setColorBackground(themeShade(THEME_ORANGE, -0.35));
-      t.setColorForeground(themeShade(THEME_CYAN, 0.2));
-      t.setColorActive(THEME_CYAN);
+    // Stiffness bars: purple fill (the STIFF segment of the row selector)
+    Controller st = cp5.getController("Stiffness " + id);
+    if (st != null) {
+      st.setColorBackground(THEME_CTRL_BG);
+      st.setColorForeground(THEME_PURPLE);
+      st.setColorActive(themeShade(THEME_PURPLE, 0.3));
+      st.setColorCaptionLabel(THEME_PURPLE);
     }
     // Torque ON/OFF switches
     Controller pw = cp5.getController("Power " + id);
@@ -225,12 +226,6 @@ void drawInfoBox() {
         + ", " + aiAnimFrameDurationMs + " ms/pose");
     }
     colors.add(color(255, 100, 220));
-  }
-
-  if (showHingeMarkers) {
-    texts.add("hinge offset X:" + nf(hingeOffsetX, 1, 1) + " Y:" + nf(hingeOffsetY, 1, 1) + " Z:" + nf(hingeOffsetZ, 1, 1)
-      + " (arrows = X/Z, [ ] = Y). Tap a marker to soften that joint.");
-    colors.add(color(0, 255, 140));
   }
 
   if (texts.isEmpty()) return;
