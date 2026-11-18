@@ -61,17 +61,19 @@ const float PROTOCOL_VERSION = 2.0;
 // torque is exactly as strong as before.
 
 // Physical Dynamixel IDs in CHAIN ORDER - first entry = the joint next to
-// the fixed base, last entry = the tip. On this arm the IDs count UP from
-// the base: 1 next to the base ... 11 at the tip, same as the GUI labels.
+// the fixed base, last entry = the tip. The IDs count UP from the base:
+// 2 next to the base ... 12 at the tip, same as the GUI labels.
+// (2026-11-18: was 1..11. On the teammate's arm, assembled the other way
+// round, ID 1 isn't connected to anything, so the chain is IDs 2..12.)
 // Create Shape frames, animations and the live readings use this order
 // (slot i -> DXL_IDS[i]); single-motor commands use the ID itself.
 const uint8_t DXL_IDS[NUM_MOTORS] = {
-  1, 2, 3, 4, 5, 6,
-  7, 8, 9, 10, 11
+  2, 3, 4, 5, 6, 7,
+  8, 9, 10, 11, 12
 };
 
-// Motors mounted facing the other way, listed by their GUI MOTOR NUMBER
-// (1 = base ... 11 = tip, same as the slider labels) - not the hardware ID.
+// Motors mounted facing the other way, listed by their HARDWARE ID (= the
+// GUI label since 2026-11-18, e.g. 2 = base ... 12 = tip).
 // Their angle is mirrored around the 180 deg neutral - sent as 360 - angle
 // and read back the same way - so every motor bends the same direction for
 // the same slider change.
@@ -105,8 +107,9 @@ const uint8_t DXL_IDS[NUM_MOTORS] = {
   #define ACTIVE_MOTORS NUM_MOTORS
 #endif
 
-// Per-motor angle correction in degrees, by GUI motor number (1 = base ...
-// 11 = tip): offset = what the GUI SHOWS minus the REAL angle. E.g. a motor
+// Per-motor angle correction in degrees, one entry per motor in CHAIN ORDER
+// (first = the motor next to the base = DXL_IDS[0] = ID 2 ... last = ID 12):
+// offset = what the GUI SHOWS minus the REAL angle. E.g. a motor
 // that reads 209 while physically straight (180) gets 29. Used for motors
 // whose horn is mounted slightly rotated. Set in local_config.h.
 #ifndef ANGLE_OFFSETS_DEG
@@ -135,11 +138,12 @@ const float ANGLE_OFFSETS[NUM_MOTORS] = { ANGLE_OFFSETS_DEG }; // missing entrie
   #define DROOP_I_GAIN 150
 #endif
 // JOINT RANGE: +/-105 deg off the straight pose - the normal +/-90 plus 15
-// deg of extra travel some motors have. In the GUI-frame degrees used by
-// this protocol (180 = straight) that is 75..285 - the GUI SHOWS it as
-// -15..195 with 90 = straight. Every goal is clamped to this; readings are
-// not (so the GUI can show a joint pushed past a limit at its true angle).
-// Must match JOINT_MIN_DEG / JOINT_MAX_DEG in Gui_3_0.pde.
+// deg of extra travel some motors have. PHYSICAL limits of the assembled arm
+// - don't widen them. In the GUI-frame degrees used by this protocol (180 =
+// straight) that is 75..285 - the GUI SHOWS it as -15..195 with 90 =
+// straight. Every goal is clamped to this; readings are not (so the GUI can
+// show a joint pushed past a limit at its true angle). Must match
+// JOINT_MIN_DEG / JOINT_MAX_DEG in Gui_3_0.pde.
 const float JOINT_MIN_DEG = 75;
 const float JOINT_MAX_DEG = 285;
 
@@ -153,7 +157,7 @@ const float JOINT_MAX_DEG = 285;
 //   (first = XL330-M077, second = XL330-M288 - one line, or end each line with a backslash)
 // A motor whose model has no entry uses STIFFNESS_P_GAINS_LIST + DROOP_I_GAIN
 // (the single-model settings above - still fine for an arm with one model).
-// MOTOR_MODEL_OVERRIDE_LIST (by motor number, 0 = use what it reports) can
+// MOTOR_MODEL_OVERRIDE_LIST (chain order like the lists above, 0 = use what it reports) can
 // force a motor onto another model's set.
 struct GainSet { int32_t model; int32_t p[4]; int32_t i; };
 const GainSet DEFAULT_GAIN_SET = { 0, { STIFFNESS_P_GAINS_LIST }, DROOP_I_GAIN };
@@ -178,8 +182,8 @@ const GainSet* gainSetForModel(int32_t model) {
   return &DEFAULT_GAIN_SET;
 }
 
-// Per-motor stiffness trim on top of its model's set, % by motor number
-// (1 = base ... 11 = tip). 0 or missing = 100%. For a single motor that
+// Per-motor stiffness trim on top of its model's set, %, in CHAIN ORDER
+// (first entry = ID 2 at the base ... last = ID 12). 0 or missing = 100%. For a single motor that
 // oscillates ("twitches") more than others of its model. Set in local_config.h:
 //   #define P_GAIN_PCT_LIST  100, 100, 100, 100, 100, 50, 50
 #ifndef P_GAIN_PCT_LIST
@@ -203,9 +207,8 @@ uint16_t iGainFor(int i) {
 // Leading 0 is a placeholder (not a motor number) so the array is never empty.
 const uint8_t REVERSED_MOTORS[] = { 0, REVERSED_MOTORS_LIST };
 
-// Takes the hardware ID; converts it to the GUI motor number (its position
-// in DXL_IDS, 1 = base) before checking the list.
-// GUI motor number (1 = base) for a hardware ID, or -1.
+// Chain position (1 = base ... 11 = tip) for a hardware ID, or -1.
+// Indexes the chain-order lists (offsets, P gain trim, model override).
 int motorNumberOf(uint8_t id) {
   for (int i = 0; i < NUM_MOTORS; i++) {
     if (DXL_IDS[i] == id) return i + 1;
@@ -218,11 +221,11 @@ float angleOffsetOf(uint8_t id) {
   return (n >= 1) ? ANGLE_OFFSETS[n - 1] : 0;
 }
 
+// REVERSED_MOTORS_LIST holds hardware IDs (= GUI labels).
 bool isReversed(uint8_t id) {
-  int motorNumber = motorNumberOf(id);
-  if (motorNumber < 1) return false;
-  for (uint8_t k = 0; k < sizeof(REVERSED_MOTORS); k++) {
-    if (REVERSED_MOTORS[k] == motorNumber) return true;
+  if (motorNumberOf(id) < 1) return false; // not one of ours
+  for (uint8_t k = 1; k < sizeof(REVERSED_MOTORS); k++) { // [0] is the placeholder
+    if (REVERSED_MOTORS[k] == id) return true;
   }
   return false;
 }
@@ -319,7 +322,7 @@ int32_t readPresentRaw(int i) {
   return raw;
 }
 
-// Chain index 0-10 for a hardware ID 1-11, or -1 if it isn't one of ours.
+// Chain index 0-10 for a hardware ID 2-12, or -1 if it isn't one of ours.
 int indexForId(int dxlId) {
   for (int i = 0; i < ACTIVE_MOTORS; i++) {
     if (DXL_IDS[i] == dxlId) return i;
@@ -775,7 +778,7 @@ void handleCommand(byte header, const byte d[]) {
     }
   }
 
-  // TORQUE ON / OFF (Processing sends the real hardware ID, 1-11)
+  // TORQUE ON / OFF (Processing sends the real hardware ID, 2-12)
   else if (header == TORQUE_HEADER) {
     int dxlId = d[0];
     int stateValue = d[1];

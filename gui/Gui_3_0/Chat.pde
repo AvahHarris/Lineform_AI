@@ -184,7 +184,7 @@ boolean chatHandleControlEvent(String name) {
   }
   if (name.equals("New Chat")) {
     if (chatBusy) {
-      chatAdd("status", "Wait for the current reply to finish, then start a new chat.");
+      noticeAdd("status", "Wait for the current reply to finish, then start a new chat.");
       return true;
     }
     synchronized (chatLog) {
@@ -198,7 +198,11 @@ boolean chatHandleControlEvent(String name) {
   return false;
 }
 
+// Errors / warnings never go into the chat (2026-11-18): they are routed to
+// the bottom-left notice panel (Notices.pde). Robot / mode status messages
+// call noticeAdd() directly.
 void chatAdd(String who, String text) {
+  if (who.equals("error")) { noticeAdd("error", text); return; }
   synchronized (chatLog) {
     chatLog.add(new ChatEntry(who, text));
   }
@@ -395,11 +399,11 @@ void chatSubmit() {
   String msg = chatInput.getText();
   if (msg == null || msg.trim().length() == 0) return;
   if (manipulationMode) {
-    chatAdd("status", "Manipulation mode is on (motors OFF). Switch back to AI mode to ask for shapes or animations.");
+    noticeAdd("status", "Manipulation mode is on (motors OFF). Switch back to AI mode to ask for shapes or animations.");
     return;
   }
   if (chatBusy) {
-    chatAdd("status", "Still working on your last message - one moment.");
+    noticeAdd("status", "Still working on your last message - one moment.");
     return;
   }
   if (ANTHROPIC_API_KEY == null || ANTHROPIC_API_KEY.trim().length() == 0) {

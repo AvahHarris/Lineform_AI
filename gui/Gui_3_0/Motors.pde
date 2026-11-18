@@ -2,10 +2,13 @@
 //  MOTORS - per-motor ANGLE / TORQUE switch, torque limits, live angles.
 //
 //  Each motor row has a switch:
-//    ANGLE  - the slider is the motor's angle, LIVE both ways:
+//    ANGLE  - the slider is the motor's TARGET angle:
 //             * dragging it moves that motor right away
-//             * moving the arm by hand (at low torque) moves the slider,
-//               and once you let go the motor holds the new angle
+//             * a powered motor always goes back to / holds its bar angle
+//               (since 2026-11-18; pose by hand in manipulation mode, or
+//               switch the row OFF - limp rows' bars follow the real angle).
+//               AI_FOLLOW_HAND_MOVES = true restores the old "hand push
+//               becomes the new goal" behaviour.
 //             (A shape from the chat still waits for Create Shape - live
 //             reading pauses on a motor until its new angle has been sent.)
 //    TORQUE - the slider sets that motor's torque limit, 0-100%, and
@@ -34,8 +37,21 @@ final int LIVE_READ_INTERVAL_MS = 120;  // how often live angles are read
 final int LIVE_SETTLE_MS = 800;         // after sending a motor an angle, wait this long before following it
 // Hand-move detection - defaults suit stiff motors; override per arm in
 // local_config.json ("hand_move_threshold_deg", "hand_move_confirm_readings").
-float LIVE_FOLLOW_DEG = 5.0;            // hand movement smaller than this is ignored (gravity sag stays below it)
+float LIVE_FOLLOW_DEG = 2.0;            // hand movement smaller than this is ignored (was 5 for the soft arm; stiff motors barely sag)
 int LIVE_FOLLOW_CONFIRM = 1;            // ...and it must show in this many readings in a row (raise if motors twitch)
+// HAND MOVES IN AI MODE. true (default again since 2026-11-18, with lenient
+// thresholds for the stiffer arm: local_config.json "hand_move_threshold_deg"
+// 2, "hand_move_confirm_readings" 1): a hand push becomes the motor's new goal
+// once it is let go. false ("follow_hand_moves": false) = BARS ARE THE TARGETS:
+// a powered motor ALWAYS goes back to / holds the angle on its bar - pushing it
+// by hand never changes its goal, and gravity sag never becomes a new goal.
+// The bar shows the target; the 3D view still draws the REAL live angles.
+// (Pose by hand in MANIPULATION mode, or switch a row OFF / to 0% - limp rows'
+// bars follow the real angle.) true = the old soft-motor behaviour: a hand
+// push past LIVE_FOLLOW_DEG becomes the new goal ("follow_hand_moves" in
+// local_config.json).
+boolean AI_FOLLOW_HAND_MOVES = true;
+boolean motorsBarsSynced = false; // first live reading adopted as the targets (see motorsTick)
 final int LIVE_DRAG_SEND_MS = 50;       // fastest rate a dragged slider is sent
 final int TORQUE_SEND_MS = 80;          // fastest rate a torque slider is sent
 
@@ -354,6 +370,7 @@ void motorsDisplay(int i, float deg) {
 
 // Call right after a full 255 frame was sent with these targets.
 void motorsNoteSentAll(float[] targets) {
+  motorsBarsSynced = true; // the bars ARE the targets now
   long now = millis();
   for (int i = 0; i < MOTOR_COUNT; i++) {
     motorLastSentDeg[i] = targets[i];
@@ -452,6 +469,33 @@ void motorsTick() {
   }
   motorActualMs = now;
   if (aiAnimating) return;
+
+  if (!AI_FOLLOW_HAND_MOVES) {
+    // First reading after startup: the arm is wherever it was left, the bars
+    // say 90. Take the real pose as every bar's target ONCE (and send it, so
+    // the motors' goals and the bars agree) - nothing jumps on startup.
+    if (!motorsBarsSynced) {
+      motorsBarsSynced = true;
+      for (int i = 0; i < MOTOR_COUNT; i++) {
+        if (!rowActive(i + 2)) continue;
+        motorsDisplay(i, r[i]);
+        motorsSendOneGoal(i, clampJoint(r[i]));
+      }
+      println("Startup: bars set to the arm's real pose; from now on the motors hold the bar angles.");
+      return;
+    }
+    // Bars = targets. Powered motors just hold their bar's angle (the firmware
+    // already has it as their goal), so nothing is sent and the bar is left
+    // alone. Only LIMP rows (OFF / 0%) show the real angle on their bar.
+    for (int i = 0; i < MOTOR_COUNT; i++) {
+      if (!rowActive(i + 2)) continue;
+      Controller s = cp5.getController("Motor " + (i + 2));
+      if (s.isMousePressed() || motorDragPending[i] || motorSliderPending(i)) continue;
+      boolean limp = motorTorquePct[i] == 0 || !motorPowerOn(i);
+      if (limp) motorsDisplay(i, r[i]);
+    }
+    return;
+  }
 
   for (int i = 0; i < MOTOR_COUNT; i++) {
     if (!rowActive(i + 2)) continue; // not a real motor on this arm
@@ -613,26 +657,37 @@ synchronized float[] readAllMotorValues(int header, float scale, int timeoutMs) 
   return null;
 }
 
-// Live torque use on each TORQUE slider: a white line at the current use
-// and "now NN%" at the right end. Drawn after cp5.draw() so it sits on top.
+// Live torque use (the motor's output / force): a white line at the current
+// use, 0-100% of its Current Limit across the bar, and "now NN%" at the
+// right end. Since 2026-11-18 drawn on EVERY row's bar - ANGLE, TORQUE and
+// STIFF view alike - not only on TORQUE bars. (Loads are read every cycle in
+// AI mode; in manipulation mode the motors are limp, so nothing is drawn.)
+// Drawn after cp5.draw() so it sits on top.
 void motorsDrawLoadOverlay() {
   float[] loads = motorLoadPct;
-  if (loads == null) return;
+  if (loads == null || manipulationMode) return;
   pushStyle();
   textFont(hudFont);
   hudTextSize(12);
   textAlign(RIGHT, CENTER);
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    if (!motorShowsTorque(i)) continue;
+    if (!rowActive(i + 2)) continue;
     float y = ROW_START_Y + i * ROW_STEP;
     float pct = constrain(loads[i], 0, 100);
     float lx = SLIDER_X + SLIDER_W * pct / 100.0;
+    stroke(0, 140);                       // dark edge so the line reads on any bar fill
+    strokeWeight(max(4, 4 * uiScale));
+    line(uiX(lx), uiY(y), uiX(lx), uiY(y + SLIDER_H));
     stroke(255);
     strokeWeight(max(2, 2 * uiScale));
     line(uiX(lx), uiY(y), uiX(lx), uiY(y + SLIDER_H));
     noStroke();
+    String nowText = "now " + round(loads[i]) + "%";
+    fill(0, 120);
+    hudText(nowText, SLIDER_X + SLIDER_W - 3, y + SLIDER_H / 2.0 + 1);
     fill(255);
-    hudText("now " + round(loads[i]) + "%", SLIDER_X + SLIDER_W - 4, y + SLIDER_H / 2.0);
+    hudText(nowText, SLIDER_X + SLIDER_W - 4, y + SLIDER_H / 2.0);
+    if (!motorShowsTorque(i)) continue;  // the read-back line below is for TORQUE bars only
     // What the MOTOR reports it was set to (read back ~1 s after a change),
     // under the bar - so you can see whether the setting really arrived.
     if (motorDiagTorqueOn != null && motorDiagPwmPct != null) {
@@ -720,6 +775,10 @@ float motorCanvasAngle(int i) {
   // Otherwise the TRUE angle behind the bar, unclamped - so a joint pushed
   // past its 0/180 limit is drawn where it really is, not at the limit.
   if (motorSliderPending(i)) return cp5.get(Slider.class, "Motor " + (i + 2)).getValue();
+  // Bars = targets (AI_FOLLOW_HAND_MOVES false): the bar shows the goal, the
+  // 3D view the REAL arm from the latest live reading (if it is fresh).
+  if (!manipulationMode && !AI_FOLLOW_HAND_MOVES && !aiAnimating && rowActive(i + 2)
+      && serialConnected() && motorActualMs > 0 && millis() - motorActualMs < 1000) return motorActualDeg[i];
   return motorShownDeg[i];
 }
 
@@ -793,9 +852,13 @@ void motorsApplyPower(int i, boolean on) {
   motorTorquePending[i] = false;
   if (!rowActive(rowId)) return;
   if (on) {
+    // Goes to the angle on its bar (which, while the row was limp, followed
+    // the real angle - so it holds where it is unless you dragged the bar).
     float here = cp5.getController("Motor " + rowId).getValue();
-    if (serialConnected() && millis() - motorActualMs < 600) here = motorActualDeg[i];
-    else if (serialConnected()) here = readMotorPosition(rowId, here);
+    if (AI_FOLLOW_HAND_MOVES) { // old behaviour: hold exactly where it is now
+      if (serialConnected() && millis() - motorActualMs < 600) here = motorActualDeg[i];
+      else if (serialConnected()) here = readMotorPosition(rowId, here);
+    }
     Controller s = cp5.getController("Motor " + rowId);
     updatingShapeControls = true;
     s.setBroadcast(false);
@@ -833,6 +896,10 @@ void motorsStartupDiagnostics() {
 // a lower P_GAIN_PCT_LIST entry for that motor in firmware local_config.h.
 // Not checked during animations, while you drag that motor's bar, or for
 // motors that are OFF / at 0%.
+// OFF BY DEFAULT since 2026-11-18 (it switched motors off with no real
+// problem; the stiffer arm doesn't need it). "twitch_guard": true in
+// local_config.json turns it back on.
+boolean TWITCH_GUARD_ON = false;
 final float TWITCH_MIN_STEP_DEG = 2.5; // swings smaller than this are ignored (sensor noise up to ~+/-1 deg never triggers)
 final int TWITCH_REVERSALS = 4;
 final int TWITCH_WINDOW_MS = 1500;
@@ -852,6 +919,7 @@ void motorsTwitchReset(int i) {
 }
 
 void motorsTwitchCheck(int i, float v, long now) {
+  if (!TWITCH_GUARD_ON) return;
   if (!twInit) { for (int k = 0; k < MOTOR_COUNT; k++) motorsTwitchReset(k); twInit = true; }
   Controller s = cp5.getController("Motor " + (i + 2));
   boolean dragging = motorDragPending[i] || (s != null && s.isMousePressed());
@@ -895,7 +963,7 @@ void motorsTwitchCheck(int i, float v, long now) {
     msg = who + " even at the softest level - switched it OFF. Check its cable/power, then switch it back ON.";
   }
   println("!!! " + msg);
-  chatAdd("error", msg);
+  noticeAdd("error", msg);
 }
 
 // ---- Reset: check every motor and restart any that is shut down ----
@@ -912,7 +980,7 @@ void motorsResetCheck() {
   if (!serialConnected() || manipulationMode) return;
   float[] res = readAllMotorValues(CHECK_RECOVER_HEADER, 1.0, 6000); // reboots can take a few seconds
   if (res == null) {
-    motorsPostToChat("error", "Motor check after Reset: no answer from the Arduino - upload the latest "
+    motorsPostNotice("error", "Motor check after Reset: no answer from the Arduino - upload the latest "
       + "firmware/lineform-ai/lineform-ai.ino (needs command 240).", false);
     delay(1500);
     motorsRunDiagnostics();
@@ -950,17 +1018,18 @@ void motorsResetCheck() {
     msg += " " + ok + " motor(s) were fine.";
   }
   println(msg);
-  motorsPostToChat(kind, msg, !fixed.isEmpty()); // re-send the Reset pose if anything was restarted
+  motorsPostNotice(kind, msg, !fixed.isEmpty()); // re-send the Reset pose if anything was restarted
   delay(1500);
   motorsRunDiagnostics(); // console table, as before
 }
 
-// Hands a message (and optionally a re-send of the current targets) to the
-// drawing thread - chat and serial frames must not be touched from here.
-void motorsPostToChat(final String kind, final String msg, final boolean resendTargets) {
+// Posts a message to the bottom-left notice panel (never the AI chat), and
+// optionally hands a re-send of the current targets to the drawing thread
+// (serial frames must not be sent from a background thread).
+void motorsPostNotice(final String kind, final String msg, final boolean resendTargets) {
   chatMainJobs.add(new Runnable() {
     public void run() {
-      chatAdd(kind, msg);
+      noticeAdd(kind, msg);
       if (resendTargets && !manipulationMode && !aiAnimating) aiSendSlidersOverSerial();
     }
   });

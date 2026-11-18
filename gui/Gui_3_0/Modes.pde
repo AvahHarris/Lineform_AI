@@ -68,11 +68,13 @@ boolean modesMousePressed() {
 //  OVERLOAD_TRIP_PCT, the GUI switches to manipulation mode (all torque
 //  OFF) and shows a warning. Works for every row, whether it shows its
 //  ANGLE or TORQUE bar - loads are read every cycle in AI mode.
-//  Override in local_config.json: "overload_trip_pct",
+//  ON (this is what switches to manipulation mode automatically). Override
+//  in local_config.json: "overload_trip_pct" (default 95; 0 = off),
 //  "overload_confirm_readings" (readings in a row, ~120 ms apart, needed to
-//  trip - 2 ignores a single noisy sample; 1 = trip on the first one).
+//  trip; 1 = first reading). The warning is pinned in the bottom-left
+//  notice panel (Notices.pde).
 // ---------------------------------------------------------------------
-float OVERLOAD_TRIP_PCT = 95;
+float OVERLOAD_TRIP_PCT = 95; // 0 = off
 int OVERLOAD_CONFIRM_READINGS = 2;
 int[] overloadCount = new int[MOTOR_COUNT];
 int overloadLastSeq = -1;
@@ -80,7 +82,7 @@ String overloadWarning = null; // shown in manipulation mode after a trip; clear
 
 // Called every frame from motorsTick().
 void modesCheckOverload() {
-  if (manipulationMode) return;
+  if (manipulationMode || OVERLOAD_TRIP_PCT <= 0) return;
   int seq = motorLoadSeq;
   if (seq == overloadLastSeq) return; // count each new reading once
   overloadLastSeq = seq;
@@ -106,7 +108,7 @@ void modesCheckOverload() {
   overloadWarning = "OVERLOAD: " + who + " reached " + round(OVERLOAD_TRIP_PCT)
     + "% torque. All motors switched OFF to protect them.";
   println("!!! " + overloadWarning);
-  chatAdd("error", overloadWarning + " Check what the arm is pushing against (or lighten the pose) before switching back to AI mode.");
+  // (shown PINNED in the bottom-left notice panel - Notices.pde - not in the chat)
 }
 
 // ---------------------------------------------------------------------
@@ -159,7 +161,7 @@ void modeEnterManipulation() {
   modesApplyControls();
   themeApplyMode();
   println("MANIPULATION MODE: all motors torque OFF - move the arm by hand.");
-  chatAdd("status", "Manipulation mode: all motors are OFF. Move the arm by hand - the bars show the real angles. "
+  noticeAdd("status", "Manipulation mode: all motors are OFF. Move the arm by hand - the bars show the real angles. "
     + "Switch back to AI mode to hold the pose. (Any unsent bar values were dropped.)");
 }
 
@@ -211,15 +213,16 @@ void modeExitManipulation() {
     }
   }
   if (here != null) motorActualMs = now;
+  motorsBarsSynced = true; // the hand-made pose is now every bar's target
 
   modesApplyControls();
   themeApplyMode();
   println("AI MODE: " + held + " motors holding the hand-posed angles" + (limp > 0 ? ", " + limp + " left limp (OFF / 0%)" : "") + ".");
-  chatAdd("status", "AI mode: the arm holds the pose you made" + (limp > 0 ? " (" + limp + " motor(s) stay limp - switched OFF or at 0% torque)" : "") + ".");
+  noticeAdd("status", "AI mode: the arm holds the pose you made" + (limp > 0 ? " (" + limp + " motor(s) stay limp - switched OFF or at 0% torque)" : "") + ".");
   if (pastLimit.length() > 0) {
     String m = "Moved back inside the " + jointRangeText() + " range: " + pastLimit + ".";
     println(m);
-    chatAdd("status", m);
+    noticeAdd("status", m);
   }
   if (serialConnected()) {
     motorsDiagDueMs = millis() + 2500; // console diagnostics table, as before
@@ -235,13 +238,13 @@ void modesVerifyHold() {
   delay(1500);
   if (!serialConnected() || manipulationMode) return;
   if (serialAckMisses >= 3) {
-    motorsPostToChat("error", "Hold check: the Arduino isn't acknowledging commands - it runs OLD firmware, which doesn't "
+    motorsPostNotice("error", "Hold check: the Arduino isn't acknowledging commands - it runs OLD firmware, which doesn't "
       + "know HOLD_HERE (241), so the motors stay limp. Upload firmware/lineform-ai/lineform-ai.ino.", false);
     return;
   }
   float[] st = readAllMotorValues(STATUS_HOLD_HEADER, 1.0);
   if (st == null) {
-    motorsPostToChat("error", "Hold check: no answer to command 239 - the Arduino runs older firmware. Upload "
+    motorsPostNotice("error", "Hold check: no answer to command 239 - the Arduino runs older firmware. Upload "
       + "firmware/lineform-ai/lineform-ai.ino (needed for holding the pose after manipulation mode).", false);
     return;
   }
@@ -273,7 +276,7 @@ void modesVerifyHold() {
   if (!drift.isEmpty()) msg += " Drifted away from the pose: " + String.join(", ", drift)
     + " - too weak/soft for the load (raise the torque bar or stiffness), or pulled back to a joint limit.";
   println("!!! " + msg);
-  motorsPostToChat("error", msg, false);
+  motorsPostNotice("error", msg, false);
 }
 
 // Shows / hides / locks the left-panel controls for the current mode.
@@ -394,24 +397,8 @@ void drawModeSwitchPanel() {
   fill(THEME_TEXT);
   hudText("Move the arm by hand. Switch back to AI mode to hold this pose.", bx + bw / 2, by + 34);
 
-  // Overload warning (the chat panel is hidden in this mode, so it goes here;
-  // it is also in the chat log and the console).
-  String w = overloadWarning;
-  if (w != null) {
-    textFont(uiBoldFont(max(8, round(15 * uiScale))));
-    textAlign(LEFT, TOP);
-    float pad = 10, lineH = 15 * 1.35;
-    ArrayList<String> lines = chatWrap("!! " + w +" Check what the arm is pushing against before switching back.",
-                                       (bw - 2 * pad) * uiScale);
-    float wy = by + bh + 8, wh = lines.size() * lineH + 2 * pad;
-    fill(170, 30, 40, 235);
-    stroke(255, 90, 90);
-    strokeWeight(max(1, 2 * uiScale));
-    rect(uiX(bx), uiY(wy), bw * uiScale, wh * uiScale, 10 * uiScale);
-    noStroke();
-    fill(255);
-    for (int k = 0; k < lines.size(); k++) hudText(lines.get(k), bx + pad, wy + pad + k * lineH);
-  }
+  // (The overload warning is no longer drawn here: every warning sits in
+  // the bottom-left notice panel - Notices.pde.)
   popStyle();
 }
 

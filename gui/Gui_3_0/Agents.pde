@@ -44,6 +44,7 @@ String agentShapeName = "";
 boolean agentShapeClosed = false;
 JSONArray agentShapeSegments = null;   // null = none yet, or a calibrated preset
 int[] agentShapeTorque = null;         // the Designer's torque plan for the shape (null = none)
+int[] agentShapeStiffness = null;      // the Designer's stiffness plan for the shape (null = none)
 
 void agentsResetMemory() {
   chatHistory = new JSONArray();
@@ -57,6 +58,32 @@ void agentsResetMemory() {
 // =====================================================================
 //  DESIGNER
 // =====================================================================
+
+// Shared by the Designer and the Motion agent (2026-11-18): what the three
+// per-joint settings are and how they interact on THIS arm.
+String AGENT_JOINT_SETTINGS_GUIDE =
+  "- JOINT SETTINGS. Every joint has three settings you can change; ALL of them are your "
+  + "tools, not just the angles:\n"
+  + "  * ANGLE - where the joint goes (from your segments / poses / wave).\n"
+  + "  * TORQUE (joint_torque, 0-100 %) - HOW HARD it may push: a cap on the motor's "
+  + "force. 100 = full strength; lower = weaker, slower, gives way under load and may sag "
+  + "when it carries the joints after it (the joints near the base carry the most); 0 = "
+  + "LIMP, a free hinge that holds no angle at all.\n"
+  + "  * STIFFNESS (joint_stiffness, level 0-3) - how firmly it pulls back to its angle "
+  + "when it is off it (its position gain). 0 = full: precise, springs straight back; 1 = "
+  + "medium; 2 = soft; 3 = very soft: springy and compliant, lags and wobbles behind fast "
+  + "motion, settles a little short under load. Softer levels also turn off the motor's "
+  + "gravity correction, so a soft joint carrying weight droops a bit.\n"
+  + "  * They combine: torque limits the FORCE, stiffness sets the SPRINGINESS. Firm and "
+  + "exact = torque 100 + level 0. Loose but still moving = full or medium torque + level "
+  + "2-3. Weak / gentle = low torque. Free-swinging = torque 0.\n"
+  + "  * This arm has STIFF motors (XL330-M288-class): at torque 100 + level 0 a joint "
+  + "holds its angle firmly with little sag, even when it carries the rest of the chain, "
+  + "so full settings are the right default for rigid objects. Softening is a deliberate "
+  + "choice for parts that should look or feel loose.\n"
+  + "  * The arm-state note at the end of each user message lists every joint's current "
+  + "torque and stiffness level (base to tip). The user can change them with "
+  + "the TORQUE / STIFF bars at any time, so read them each turn.\n";
 
 String DESIGNER_SYSTEM_HEAD =
   "You are the DESIGNER agent inside a chat panel that drives a physical "
@@ -83,13 +110,19 @@ String DESIGNER_SYSTEM_TAIL =
   + "repeat it back.\n"
   + "- If a request is truly ambiguous, ask ONE short question - but usually "
   + "make a reasonable attempt the user can react to.\n"
-  + "- If the arm-state note lists torque limits, joints at 0% are limp and can't hold "
-  + "a bend, and weak joints may sag - prefer shapes that bend at the stronger joints.\n"
-  + "- You can set joint_torque (11 values, 0-100, base to tip) when the object has parts "
-  + "that should be soft or loose: e.g. a NUNCHUCK is two rigid sticks (100) joined by a "
-  + "loose chain (the joints in between at 0 = limp, free-swinging); a rope or tail end can "
-  + "be low. The MOTION agent receives your torque plan with the shape and builds "
-  + "animations around it. Leave joint_torque out to keep the user's current torque.\n"
+  + AGENT_JOINT_SETTINGS_GUIDE
+  + "- FOR SHAPES: the segments set the ANGLES; joint_torque and joint_stiffness set how "
+  + "each joint HOLDS them, and stay in effect until changed (the user's bars, you, the "
+  + "Motion agent, or Reset). Use them when the object has parts that should be soft or "
+  + "loose: e.g. a NUNCHUCK is two rigid sticks (torque 100, stiffness 0) joined by a "
+  + "loose chain (the joints in between at torque 0 = limp, free-swinging); a rope, tail "
+  + "or flag end can be lower torque and/or softer (level 2-3) so it gives when touched; a "
+  + "tool, frame or polygon stays at 100 / level 0 so its corners hold exactly. When the "
+  + "user asks to make the shape (or part of it) firmer, softer, stronger, weaker, looser, "
+  + "floppier, more rigid, etc., change joint_torque / joint_stiffness - you can do that "
+  + "WITHOUT changing the angles by resending the same segments. The MOTION agent "
+  + "receives your torque and stiffness plans with the shape and builds animations "
+  + "around them. Leave a field out to keep the current values for it.\n"
   + "- You may think briefly before a tool call, but the user does NOT see that "
   + "text. Put what the user should read in the tool's message_to_user field: "
   + "1-2 short, plain sentences about what you made or changed (no segment "
@@ -114,7 +147,13 @@ JSONObject designerBuildRequestBody(JSONArray turn) {
     "OPTIONAL. Torque for each joint while holding this shape, 11 integers 0-100, base to "
     + "tip. 100 = holds rigidly, lower = softer/compliant, 0 = LIMP free hinge that holds no "
     + "angle (e.g. the chain between the two sticks of a nunchuck). Leave out to keep the "
-    + "user's current torque.");
+    + "current torque.");
+  chatAddStiffnessField(shapeTool,
+    "OPTIONAL. Stiffness LEVEL for each joint while holding this shape, 11 integers 0-3, "
+    + "base to tip. 0 = full stiffness (holds its angle exactly, springs straight back when "
+    + "pushed), 1 = medium, 2 = soft, 3 = very soft (gives way easily, may sag a little "
+    + "under the joints it carries). Stays in effect after the shape. Leave out to keep the "
+    + "current levels.");
   JSONArray tools = new JSONArray();
   tools.append(shapeTool);
   body.setJSONArray("tools", tools);
@@ -183,6 +222,7 @@ void designerRunTurn(String userText) {
       agentShapeClosed = false;
       agentShapeSegments = null;
       agentShapeTorque = null;
+      agentShapeStiffness = null;
       chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, "Used the calibrated preset '"
         + match + "' from the shape library (tuned on the real arm). It is now on the arm.");
       chatAdd("claude", chatMessageForUser(input, "That's my calibrated \"" + match + "\" - loaded it."));
@@ -248,6 +288,16 @@ void designerRunTurn(String userText) {
       }
     });
     chatAdd("status", "Designer set torque, base to tip: " + motorsTorqueList(torquePlan) + " (0 = limp).");
+  }
+  final int[] stiffPlan = agentsParseStiffness(best.input);
+  agentShapeStiffness = stiffPlan;
+  if (stiffPlan != null) {
+    chatRunOnMain(new Runnable() {
+      public void run() {
+        aiApplyStiffnessLevels(stiffPlan);
+      }
+    });
+    chatAdd("status", "Designer set stiffness, base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft).");
   }
 
   String owed = "Applied to the arm. Fit quality " + nf(best.quality, 1, 2)
@@ -629,19 +679,26 @@ String MOTION_SYSTEM_TAIL =
   + "swing', 'softer tail', 'more like a wave'), start from YOUR MOST RECENT animation in "
   + "this conversation and change only what was asked. Always send the COMPLETE "
   + "animation.\n"
-  + "- The user can limit each joint's TORQUE (shown in the arm-state note when any joint "
-  + "is below 100%). Respect it: joints at 0% are limp and will not move or hold, so build "
-  + "the motion from the other joints and keep the limp ones still; low-torque joints are "
-  + "weak and slow, so give them smaller, gentler moves, avoid making them hold big bends "
-  + "or carry the joints after them, and let the stronger joints do the work. Never set "
-  + "joint_stiffness stiffer (lower level) on a low-torque joint than a strong one needs.\n"
-  + "- The Designer may hand you a TORQUE PLAN with the shape (in the shape note). Use it as "
-  + "the starting point for joint_torque: keep its limp (0) and soft joints unless the user "
-  + "asks otherwise. Limp joints swing PASSIVELY - they are thrown around by the motion of "
-  + "the strong joints, so animate the strong joints to make them swing (e.g. nunchuck: "
-  + "whip the rigid stick at the base back and forth and let the limp chain and far stick "
-  + "fly). Their angles in your poses are ignored by the hardware. joint_torque only "
-  + "applies while the animation plays; the previous torque comes back when it stops.\n"
+  + AGENT_JOINT_SETTINGS_GUIDE
+  + "- FOR ANIMATIONS: you control the ANGLES (poses / traveling_wave), joint_torque and "
+  + "joint_stiffness together. Both settings apply while the animation plays and the "
+  + "previous values come back when it stops. Leave a field out to keep the current "
+  + "values (listed in the arm-state note) - so decide deliberately each time whether "
+  + "to change them. When the user asks for a motion that is floppier, looser, more "
+  + "relaxed, whippier, gentler, stronger, snappier, more precise, more robotic, etc., "
+  + "change torque / stiffness, not just the angles and speed.\n"
+  + "- Respect low torque: joints at 0% are limp and will not move or hold, so build the "
+  + "motion from the other joints; low-torque joints are weak and slow, so give them "
+  + "smaller, gentler moves, avoid making them hold big bends or carry the joints after "
+  + "them, and let the stronger joints do the work. A fast motion needs full torque on "
+  + "the joints that drive it.\n"
+  + "- The Designer may hand you a TORQUE PLAN and/or STIFFNESS PLAN with the shape (in the "
+  + "shape note). Use them as the starting point: keep their limp (0 torque) and soft "
+  + "joints unless the user asks otherwise. Limp joints swing PASSIVELY - they are thrown "
+  + "around by the motion of the strong joints, so animate the strong joints to make them "
+  + "swing (e.g. nunchuck: whip the rigid stick at the base back and forth and let the "
+  + "limp chain and far stick fly). Their angles in your poses are ignored by the "
+  + "hardware.\n"
   + "- If the user asks for a still shape, briefly tell them to switch the mode to Shape "
   + "(the Designer handles that).\n"
   + "- You may think briefly before the tool call, but the user does NOT see that text. "
@@ -666,7 +723,8 @@ JSONObject motionBuildRequestBody(JSONArray turn) {
     + "tip (restored when it stops). 100 = full strength, lower = weaker/softer, 0 = LIMP: "
     + "the joint swings freely, driven only by the motion of the joints around it (chains, "
     + "ropes, a nunchuck's link). Start from the Designer's torque plan if one was given. "
-    + "Leave out to keep the current torque.");
+    + "Leave out to keep the current torque. joint_stiffness (0-3 levels) is the other "
+    + "half of the feel - see its description.");
   JSONArray tools = new JSONArray();
   tools.append(animTool);
   body.setJSONArray("tools", tools);
@@ -685,6 +743,7 @@ String motionShapeContext() {
     return "\n\n[Designer's current shape: '" + agentShapeName + "', closed=" + agentShapeClosed
       + ", segments: " + agentShapeSegments.format(-1)
       + (agentShapeTorque != null ? "; Designer's TORQUE PLAN, base to tip (0 = limp): " + motorsTorqueList(agentShapeTorque) : "")
+      + (agentShapeStiffness != null ? "; Designer's STIFFNESS PLAN, base to tip (0 = full ... 3 = very soft): " + motorsTorqueList(agentShapeStiffness) : "")
       + "]";
   }
   if (agentShapeName.length() > 0) {
@@ -704,7 +763,7 @@ void motionRunTurn(String userText) {
     for (int i = 0; i < MOTOR_COUNT; i++) {
       sb.append(i == 0 ? "" : ", ").append(round(cp5.getController("Motor " + (i + 2)).getValue()));
     }
-    angles = "\n[Current joint angles, base to tip (180 = straight; each joint can only reach 90-270, i.e. +/-90 from straight, for AI shapes): [" + sb + "]]";
+    angles = "\n[Current joint angles, base to tip (180 = straight; each joint can only reach " + round(180 - AI_MAX_TURN_DEG) + "-" + round(180 + AI_MAX_TURN_DEG) + ", i.e. +/-" + round(AI_MAX_TURN_DEG) + " from straight, for AI shapes): [" + sb + "]]";
   }
 
   JSONArray content = new JSONArray();
@@ -749,12 +808,16 @@ void motionRunTurn(String userText) {
   });
   if (animTorque != null) chatAdd("status", "Torque during this animation, base to tip: "
     + motorsTorqueList(animTorque) + " (0 = limp; restored when it stops).");
+  if (anim.stiffnessGiven) chatAdd("status", "Stiffness during this animation, base to tip: "
+    + motorsTorqueList(anim.jointStiffness) + " (0 = full ... 3 = very soft; restored when it stops).");
   String summary = anim.isTravelingWave
     ? "traveling wave, " + nf(anim.waveAmplitudeDeg, 1, 0) + " deg, " + nf(anim.waveWavelengthJoints, 1, 1)
       + " joints/cycle, " + round(anim.wavePeriodMs) + " ms/cycle"
     : anim.poses.size() + " poses, " + round(anim.frameDurationMs) + " ms per pose";
   chatCommitTo(motionHistory, motionPendingToolResults, turn, toolUse, "Animation '" + anim.animationName + "' ("
-    + summary + ") is now playing on the arm. Joint stiffness: " + aiJoinIntArray(anim.jointStiffness) + ".");
+    + summary + ") is now playing on the arm. Joint stiffness: "
+    + (anim.stiffnessGiven ? aiJoinIntArray(anim.jointStiffness) : "unchanged (kept the current levels)")
+    + (animTorque != null ? "; joint torque: " + motorsTorqueList(animTorque) : "; joint torque unchanged") + ".");
   chatAdd("motion", chatMessageForUser(input, "Playing \"" + anim.animationName + "\"."));
   chatAdd("status", "Playing: " + anim.animationName + " (" + summary + "). Stop Animation ends it.");
 }
@@ -802,6 +865,54 @@ void chatAddTorqueField(JSONObject tool, String description) {
   prop.setInt("maxItems", MOTOR_COUNT);
   prop.setString("description", description);
   tool.getJSONObject("input_schema").getJSONObject("properties").setJSONObject("joint_torque", prop);
+}
+
+// Adds the optional joint_stiffness field (11 x level 0..NUM_STIFFNESS_LEVELS-1).
+void chatAddStiffnessField(JSONObject tool, String description) {
+  JSONObject item = new JSONObject();
+  item.setString("type", "integer");
+  item.setInt("minimum", 0);
+  item.setInt("maximum", NUM_STIFFNESS_LEVELS - 1);
+  JSONObject prop = new JSONObject();
+  prop.setString("type", "array");
+  prop.setJSONObject("items", item);
+  prop.setInt("minItems", MOTOR_COUNT);
+  prop.setInt("maxItems", MOTOR_COUNT);
+  prop.setString("description", description);
+  tool.getJSONObject("input_schema").getJSONObject("properties").setJSONObject("joint_stiffness", prop);
+}
+
+// joint_stiffness from a tool call, or null if absent / not exactly 11 values.
+int[] agentsParseStiffness(JSONObject input) {
+  if (input == null || !input.hasKey("joint_stiffness")) return null;
+  try {
+    JSONArray a = input.getJSONArray("joint_stiffness");
+    if (a == null || a.size() != MOTOR_COUNT) return null;
+    int[] out = new int[MOTOR_COUNT];
+    for (int i = 0; i < MOTOR_COUNT; i++) out[i] = constrain(round(a.getFloat(i)), 0, NUM_STIFFNESS_LEVELS - 1);
+    return out;
+  }
+  catch (Exception e) {
+    return null;
+  }
+}
+
+// The joint settings right now, for every agent message: torque % and
+// stiffness level per joint, base to tip, plus which joints are switched OFF.
+String agentsJointSettingsNote() {
+  StringBuilder tq = new StringBuilder(), st = new StringBuilder();
+  String off = "";
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    String sep = i == 0 ? "" : ", ";
+    boolean powered = motorPowerOn(i) && rowActive(i + 2);
+    tq.append(sep).append(powered ? motorTorquePct[i] : 0);
+    st.append(sep).append(hingeStiffnessLevel[i]);
+    if (rowActive(i + 2) && !motorPowerOn(i)) off += (off.length() == 0 ? "" : ", ") + "joint " + (i + 1);
+  }
+  return "joint settings, base to tip (joint 1 = motor labelled " + displayId(2) + " ... joint 11 = motor "
+    + displayId(MOTOR_COUNT + 1) + "): TORQUE % [" + tq + "] (0 = limp)"
+    + ", STIFFNESS level [" + st + "] (0 = full ... 3 = very soft)"
+    + (off.length() == 0 ? "" : "; switched OFF by the user (limp, leave them limp): " + off);
 }
 
 // joint_torque from a tool call, or null if absent / not exactly 11 values.
@@ -890,10 +1001,10 @@ String chatStateNote() {
     }
     if (changed) {
       hand = "; the user has hand-adjusted the sliders since, and the joint angles are now ["
-        + sb + "] (degrees, base to tip, 180 = straight, each joint limited to 90-270)";
+        + sb + "] (degrees, base to tip, 180 = straight, each joint limited to " + round(180 - AI_MAX_TURN_DEG) + "-" + round(180 + AI_MAX_TURN_DEG) + ")";
     }
   }
-  return "\n\n[Arm right now: " + state + hand + motorsTorqueNote() + ".]";
+  return "\n\n[Arm right now: " + state + hand + "; " + agentsJointSettingsNote() + ".]";
 }
 
 JSONObject chatTextBlock(String text) {

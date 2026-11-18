@@ -25,14 +25,14 @@ void drawlineform3d() {
   translate(CHAIN_ORIGIN.x, CHAIN_ORIGIN.y, CHAIN_ORIGIN.z);   // = joint 1's pivot
 
   if (BASE_BLOCK_FIRST) {
-    // Fixed (passive) "12" block BEFORE motor 1: its shaft is joint 1's
+    // Fixed (passive) block BEFORE the first motor - the unconnected ID 1 motor, labelled "1": its shaft is the first joint's
     // pivot, so it sits one step behind, never rotating.
     pushMatrix();
     translate(LINK_BOX_CENTER_X - LINK_STEP, 0, 0);
-    drawLinkBlock(0, THEME_LINK_PASSIVE, "12");
+    drawLinkBlock(0, THEME_LINK_PASSIVE, PASSIVE_BLOCK_LABEL);
     popMatrix();
   } else {
-    // No "12" block at the base on this arm: a fixed mount plate behind
+    // No passive block at the base: a fixed mount plate behind
     // joint 1, so motor 1 visibly swings about something.
     pushMatrix();
     translate(-LINK_WIDTH * 0.45, 0, 0);
@@ -82,7 +82,7 @@ void drawlineform3d() {
     pushMatrix();
     translate(LINK_BOX_CENTER_X, 0, 0);
     color c = !fitted ? THEME_LINK_PASSIVE : (motorNumber % 2 == 1 ? THEME_LINK_A : THEME_LINK_B);
-    drawLinkBlock(motorNumber, c, "" + displayId(dxlId)); // 1 next to the base ... 11 at the tip
+    drawLinkBlock(motorNumber, c, "" + displayId(dxlId)); // real ID: 2 next to the base ... 12 at the tip
 
     // Record this block's actual centre in world space, so the curve runs
     // straight through the blocks.
@@ -98,7 +98,7 @@ void drawlineform3d() {
     drawLinkBridge(MOTOR_COUNT + 1);
     pushMatrix();
     translate(LINK_BOX_CENTER_X, 0, 0);
-    drawLinkBlock(MOTOR_COUNT + 1, THEME_LINK_PASSIVE, "12");
+    drawLinkBlock(MOTOR_COUNT + 1, THEME_LINK_PASSIVE, PASSIVE_BLOCK_LABEL);
     popMatrix();
   }
   popMatrix();

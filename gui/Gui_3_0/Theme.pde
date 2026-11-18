@@ -200,7 +200,9 @@ final float INFO_Y = 620;
 final float INFO_W = 400;
 final float INFO_TEXT = 14;
 
-void drawInfoBox() {
+// Returns the box's bottom edge (logical y), or -1 if nothing was drawn -
+// the notice panel (Notices.pde) stays below it.
+float drawInfoBox() {
   ArrayList<String> texts = new ArrayList<String>();
   ArrayList<Integer> colors = new ArrayList<Integer>();
 
@@ -228,7 +230,7 @@ void drawInfoBox() {
     colors.add(color(255, 100, 220));
   }
 
-  if (texts.isEmpty()) return;
+  if (texts.isEmpty()) return -1;
 
   pushStyle();
   textFont(hudFont);
@@ -245,10 +247,12 @@ void drawInfoBox() {
       lineColors.add(colors.get(i));
     }
   }
-  themePanel(INFO_X, INFO_Y, INFO_W, lines.size() * lineH + 2 * pad);
+  float boxH = lines.size() * lineH + 2 * pad;
+  themePanel(INFO_X, INFO_Y, INFO_W, boxH);
   for (int k = 0; k < lines.size(); k++) {
     fill(lineColors.get(k));
     hudText(lines.get(k), INFO_X + pad + 2, INFO_Y + pad + k * lineH);
   }
   popStyle();
+  return INFO_Y + boxH;
 }

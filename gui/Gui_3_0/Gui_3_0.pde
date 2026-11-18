@@ -54,18 +54,19 @@ boolean serialConnected() { return !SIMULATION_MODE && myPort != null; }
 // from the base to the tip (internal names only). Two numbers per row:
 //
 //   displayId(row) - what the USER sees (slider/torque labels, 3D box numbers,
-//                    hinge tags): 1 next to the base ... 11 at the tip.
+//                    warnings, console)
 //   hwId(row)      - the REAL Dynamixel ID that every serial command uses.
 //
-// On this arm they are the same: Dynamixel ID 1 is next to the base, counting
-// up to ID 11 at the tip. If the motors are ever renumbered, change hwId()
-// only - the labels stay base = 1.
+// 2026-11-18: the chain is Dynamixel IDs 2 (base) ... 12 (tip) - on the
+// teammate's arm, assembled the other way round, ID 1 isn't connected. Row
+// "Motor N" drives ID N, and the labels show the real ID too (2..12). Must
+// match DXL_IDS in firmware lineform-ai.ino. (Was IDs 1..11, labels 1..11.)
 int displayId(int rowId) {
-  return rowId - 1;
+  return rowId;
 }
 
 int hwId(int rowId) {
-  return rowId - 1;
+  return rowId;
 }
 
 // ---- Per-device settings (local_config.json, git-ignored) ----
@@ -75,12 +76,15 @@ int hwId(int rowId) {
 // arm: inactive rows never send commands to the hardware, are skipped by
 // live reading, and are drawn grey and straight on the canvas.
 //   active_motors     - how many real motors this arm has (default 11)
-//   base_block_first  - true: draw the fixed "12" block before motor 1 (at
+//   base_block_first  - true: draw the fixed passive block before the first motor (at
 //                       the base); false: draw it after the last motor
 //   hand_move_threshold_deg / hand_move_confirm_readings - how big and how
 //                       sustained a push must be to count as a hand move
 //                       (defaults 5 / 1; raise for softer or twitchy motors)
 // Copy local_config.example.json to local_config.json to change these.
+// Label of the fixed (passive) block in the 3D view. Was "12"; since the
+// motors are IDs 2..12 it is "1" - the unconnected ID 1 motor.
+final String PASSIVE_BLOCK_LABEL = "1";
 int ACTIVE_MOTORS = 11; // = MOTOR_COUNT (declared further down, so not referenced here)
 boolean BASE_BLOCK_FIRST = true;
 
@@ -93,11 +97,16 @@ void loadLocalConfig() {
     if (c.hasKey("base_block_first")) BASE_BLOCK_FIRST = c.getBoolean("base_block_first");
     if (c.hasKey("hand_move_threshold_deg")) LIVE_FOLLOW_DEG = max(1, c.getFloat("hand_move_threshold_deg"));
     if (c.hasKey("hand_move_confirm_readings")) LIVE_FOLLOW_CONFIRM = max(1, c.getInt("hand_move_confirm_readings"));
-    if (c.hasKey("overload_trip_pct")) OVERLOAD_TRIP_PCT = constrain(c.getFloat("overload_trip_pct"), 10, 150);
+    if (c.hasKey("overload_trip_pct")) OVERLOAD_TRIP_PCT = max(0, c.getFloat("overload_trip_pct")); // 0 = off
+    if (c.hasKey("twitch_guard")) TWITCH_GUARD_ON = c.getBoolean("twitch_guard");
+    if (c.hasKey("follow_hand_moves")) AI_FOLLOW_HAND_MOVES = c.getBoolean("follow_hand_moves");
     if (c.hasKey("overload_confirm_readings")) OVERLOAD_CONFIRM_READINGS = max(1, c.getInt("overload_confirm_readings"));
     println("local_config.json: " + ACTIVE_MOTORS + " active motors, base block "
       + (BASE_BLOCK_FIRST ? "before motor 1" : "after the last motor")
-      + ", hand move > " + LIVE_FOLLOW_DEG + " deg for " + LIVE_FOLLOW_CONFIRM + " reading(s)");
+      + ", hand move > " + LIVE_FOLLOW_DEG + " deg for " + LIVE_FOLLOW_CONFIRM + " reading(s)"
+      + ", overload trip " + (OVERLOAD_TRIP_PCT > 0 ? OVERLOAD_TRIP_PCT + "%" : "OFF")
+      + ", twitch guard " + (TWITCH_GUARD_ON ? "ON" : "OFF")
+      + ", AI mode " + (AI_FOLLOW_HAND_MOVES ? "follows hand moves" : "holds the bar angles"));
   } catch (Exception e) {
     println("Couldn't read local_config.json (" + e.getMessage() + ") - using defaults.");
   }
@@ -256,7 +265,9 @@ String ANTHROPIC_API_KEY; // loaded in setup() - see loadApiKey()
 //   i.e. 90 = straight, normal travel 0..180.
 // Commands (bars, Create Shape, presets, animations, holding a hand pose)
 // may use the normal +/-90 PLUS JOINT_EXTRA_DEG of extra travel some motors
-// have: displayed -15..195 = internal 75..285. The firmware clamps again.
+// have: displayed -15..195 = internal 75..285. These are PHYSICAL limits of
+// the assembled arm - don't widen them. The firmware clamps again
+// (JOINT_MIN_DEG / JOINT_MAX_DEG in lineform-ai.ino).
 // Readings are NEVER clamped: a joint pushed past a limit by hand shows its
 // true angle (bar pinned at the end, readout in red).
 final float JOINT_EXTRA_DEG = 15;                      // beyond 0 / 180 displayed
@@ -271,7 +282,7 @@ String jointRangeText() { return round(toDisplayDeg(JOINT_MIN_DEG)) + " to " + r
 // How far the AI may bend a joint off its 180 deg neutral. Kept at the
 // NORMAL +/-90 (displayed 0..180), not the extra +/-15: only SOME motors
 // can go further, so AI shapes / animations stay in the range every motor
-// has. Raise to 90 + JOINT_EXTRA_DEG if all of this arm's motors can.
+// has (a physical limit of the assembled arm).
 float AI_MAX_TURN_DEG = 90;
 float clampAI(float internalDeg) { return constrain(internalDeg, 180 - AI_MAX_TURN_DEG, 180 + AI_MAX_TURN_DEG); }
 
@@ -881,7 +892,7 @@ void setup() {
     int dxlId = position + 1;
 
     cp5.addSlider("Motor " + dxlId)
-      .setLabel("Motor " + displayId(dxlId)) // 1 = base ... 11 = tip
+      .setLabel("Motor " + displayId(dxlId)) // real ID: 2 = base ... 12 = tip
       .setPosition(SLIDER_X, rowY)
       .setRange(JOINT_MIN_DEG, JOINT_MAX_DEG) // straight +/-105, shown as -15..195 (see toDisplayDeg)
       .setValue(180.0)      // Starts right at your neutral 180° center
@@ -976,7 +987,7 @@ void draw() {
   // Don't let dragging inside the GUI panel (sliders, buttons, prompt box)
   // also orbit the camera - PeasyCam only knows about raw mouse events, not
   // that ControlP5 controls are logically "on top" of the 3D scene.
-  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver());
+  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver());
 
   motorsSyncStiffnessSliders(); // stiffness bars follow levels changed elsewhere (Motors.pde)
 
@@ -1004,7 +1015,9 @@ void draw() {
   drawThemeBackdrops();
 
   // Fit quality / animation / hinge info - same width as the slider panel (Theme.pde).
-  drawInfoBox();
+  float infoBottom = drawInfoBox();
+  // Every warning / status message, bottom-left, below the info box (Notices.pde).
+  drawNoticePanel(infoBottom > 0 ? infoBottom + 6 : INFO_Y);
 
   fill(255);
   textAlign(CENTER, CENTER);
@@ -1053,6 +1066,7 @@ void draw() {
 // Clicks on the hand-drawn controls (ControlP5 handles its own).
 void mousePressed() {
   if (modesMousePressed()) return;      // AI / manipulation switch (Modes.pde)
+  if (noticeMousePressed()) return;     // click the warnings panel = clear it (Notices.pde)
   if (motorsViewMousePressed()) return; // per-row ANGLE | TORQUE | STIFF selector (Motors.pde)
 }
 
@@ -1169,7 +1183,7 @@ void controlEvent(ControlEvent theEvent) {
     if (manipulationMode) {
       String poseName = "hand pose " + year() + nf(month(), 2) + nf(day(), 2) + "-" + nf(hour(), 2) + nf(minute(), 2) + nf(second(), 2);
       saveShapeToLibrary(poseName);
-      chatAdd("status", "Saved the hand-made pose as \"" + poseName + "\".");
+      noticeAdd("status", "Saved the hand-made pose as \"" + poseName + "\".");
       println("Saved the hand-made pose as \"" + poseName + "\".");
       return;
     }
@@ -1178,12 +1192,12 @@ void controlEvent(ControlEvent theEvent) {
       rawName = selectedShape.startsWith("ai: ") ? selectedShape.substring(4) : selectedShape;
     }
     if (rawName == null || rawName.trim().length() == 0 || rawName.trim().equals("none")) {
-      chatAdd("status", "To save, type a name in the chat box (don't press Send), then press Save Shape.");
+      noticeAdd("status", "To save, type a name in the chat box (don't press Send), then press Save Shape.");
       return;
     }
     saveShapeToLibrary(rawName);
     if (chatInput != null) chatInput.clear();
-    chatAdd("status", "Saved the current sliders as \"" + rawName.trim().toLowerCase() + "\".");
+    noticeAdd("status", "Saved the current sliders as \"" + rawName.trim().toLowerCase() + "\".");
     return;
   }
 
@@ -1335,7 +1349,7 @@ if (name.equals("Reset")) {
     motorsNoteSentAll(neutral);
     // Check every motor, restart any that is shut down (lost torque, hardware
     // error, not answering), report in the chat, then print diagnostics.
-    chatAdd("status", "Reset: checking all motors...");
+    noticeAdd("status", "Reset: checking all motors...");
     thread("motorsResetCheck");
   }
 
@@ -2138,7 +2152,7 @@ ArrayList<Float> aiAnimPoseFits = new ArrayList<Float>();
 
 void aiStartAnimation(AIAnimationResult result) {
   if (manipulationMode) { // a reply that arrived after switching modes
-    chatAdd("status", "Animation not started - switch back to AI mode first.");
+    noticeAdd("status", "Animation not started - switch back to AI mode first.");
     return;
   }
   aiStopAnimation(); // never leave an old animation silently playing under a new one
@@ -2190,8 +2204,13 @@ void aiStartAnimation(AIAnimationResult result) {
   // see aiCallAndParseAnimation) - for the whole animation's run, not
   // pose-to-pose (or cycle-to-cycle). aiStopAnimation() below restores
   // everything to full stiffness again once playback ends.
-  aiApplyStiffnessLevels(result.jointStiffness);
-  aiLog("Joint stiffness for '" + aiAnimName + "': " + aiJoinIntArray(result.jointStiffness));
+  // (2026-11-18) The levels from before the animation are remembered and put
+  // back by aiStopAnimation() - like the torque. Omitted joint_stiffness =
+  // keep the current levels (the user's STIFF bars / the Designer's plan).
+  aiStiffnessBeforeAnim = hingeStiffnessLevel.clone();
+  if (result.stiffnessGiven) aiApplyStiffnessLevels(result.jointStiffness);
+  aiLog("Joint stiffness for '" + aiAnimName + "': " + aiJoinIntArray(hingeStiffnessLevel)
+    + (result.stiffnessGiven ? "" : " (kept the current levels)"));
 
   // Shape Size would otherwise sit there doing nothing useful (every frame
   // of the animation overwrites the sliders it controls anyway) and inviting
@@ -2208,14 +2227,18 @@ void aiStartAnimation(AIAnimationResult result) {
 // so a motion that asked for soft/trailing joints never leaves them loose
 // once you're back to manual slider control. Safe to call even when
 // nothing is animating.
+int[] aiStiffnessBeforeAnim = null; // levels from before the running animation (restored on stop)
+
 void aiStopAnimation() {
   if (!aiAnimating) return;
   aiAnimating = false;
   aiAnimIsWave = false;
   cp5.getController("Shape Size").setLock(false);
 
-  int[] fullStiffness = new int[MOTOR_COUNT]; // all 0s
-  aiApplyStiffnessLevels(fullStiffness);
+  // Stiffness back to what it was before the animation (2026-11-18; it used
+  // to snap every joint back to full stiffness).
+  aiApplyStiffnessLevels(aiStiffnessBeforeAnim != null ? aiStiffnessBeforeAnim : new int[MOTOR_COUNT]);
+  aiStiffnessBeforeAnim = null;
   motorsRestoreAnimationTorque(); // torque back to what it was before the animation
 
   aiLog("Animation '" + aiAnimName + "' stopped.");
@@ -2373,6 +2396,7 @@ class AIAnimationResult {
   // stiffness); aiCallAndParseAnimation always fills this with something
   // valid, even when the model omits joint_stiffness entirely.
   int[] jointStiffness = new int[MOTOR_COUNT];
+  boolean stiffnessGiven = false; // false = joint_stiffness omitted: keep the current levels
 
   // Set when the model chose traveling_wave instead of poses - a motion
   // that's a sine wave propagating along the chain (snake/eel/whip/flag),
@@ -2488,6 +2512,7 @@ AIAnimationResult aiParseAnimationInput(JSONObject input) {
         for (int i = 0; i < MOTOR_COUNT; i++) {
           result.jointStiffness[i] = constrain(stiffArr.getInt(i), 0, NUM_STIFFNESS_LEVELS - 1);
         }
+        result.stiffnessGiven = true;
       } else {
         aiLog("joint_stiffness had the wrong length (" + (stiffArr == null ? "null" : str(stiffArr.size()))
           + ", expected " + MOTOR_COUNT + ") - ignoring it, animation will play at full stiffness.");
@@ -3189,7 +3214,9 @@ JSONObject aiBuildAnimationToolDefinition() {
     + "stiffness (precise, holds its angle firmly), up to " + (NUM_STIFFNESS_LEVELS - 1)
     + " = softest (loose, more passive give/wobble under its own momentum "
     + "or gravity). Applies for this animation's ENTIRE run, not pose to "
-    + "pose. Omit entirely (or use all 0s) for a normal firm motion - most "
+    + "pose; the previous levels come back when it stops. Omit it to KEEP "
+    + "the current levels (listed in the arm-state note); all 0s = make "
+    + "every joint firm for this motion - most "
     + "tools and rigid shapes (hammer, square, racket, flat iron) should "
     + "stay fully stiff. Raise it on joints where the REAL object would "
     + "look/feel loose or trailing rather than rigid - e.g. a snake or "
