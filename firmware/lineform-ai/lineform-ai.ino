@@ -34,6 +34,12 @@ const byte STATUS_ERR_HEADER    = 243; // + seq                   -> framed repl
 const byte HOLD_HERE_HEADER     = 241; // + id + percent 0-100    -> goal = EXACT present position, then torque on at percent (0 = stay limp)
                                        //    Used when the GUI leaves MANIPULATION mode: the arm keeps the pose it was
                                        //    moved to by hand, with no 1.44 deg angle-byte rounding and no turn guessing.
+const byte STATUS_PGAIN_HEADER  = 237; // + seq                   -> framed reply: 11 x Position P Gain read back FROM the motor (-1 = n/a)
+const byte STATUS_MODEL_HEADER  = 238; // + seq                   -> framed reply: 11 x model number the motor reports
+                                       //    (+20000 = no MODEL_GAINS_LIST entry for it: uses the default set; -1 = n/a)
+const byte STATUS_HOLD_HEADER   = 239; // + seq                   -> framed reply, per motor: torque on (1/0)*10000
+                                       //    + goal write ok (1/0)*5000 + min(4999, |present - HOLD_HERE goal| in 0.1 deg);
+                                       //    -1 = not fitted / no hold yet
 const byte CHECK_RECOVER_HEADER = 240; // + seq                   -> checks EVERY motor and restarts any that is shut down;
                                        //    framed reply: 11 x (result code*1000 + hardware error found), -1 = not fitted
                                        //    codes: 0 ok, 1 torque was OFF -> restarted, 2 hardware error -> rebooted + restarted,
@@ -90,7 +96,7 @@ const uint8_t DXL_IDS[NUM_MOTORS] = {
 #ifndef STIFFNESS_P_GAINS_LIST
   #define STIFFNESS_P_GAINS_LIST 1200, 700, 350, 120
 #endif
-const uint16_t STIFFNESS_P_GAINS[4] = { STIFFNESS_P_GAINS_LIST };
+// (Used as the DEFAULT gain set - see MODEL_GAINS_LIST below.)
 // How many motors this arm really has (the first ACTIVE_MOTORS entries of
 // DXL_IDS, base -> tip). The serial protocol always carries NUM_MOTORS
 // slots so the same GUI works on every arm; slots past ACTIVE_MOTORS are
@@ -137,10 +143,44 @@ const float ANGLE_OFFSETS[NUM_MOTORS] = { ANGLE_OFFSETS_DEG }; // missing entrie
 const float JOINT_MIN_DEG = 75;
 const float JOINT_MAX_DEG = 285;
 
-// Per-motor stiffness scale, % of the STIFFNESS_P_GAINS level, by GUI motor
-// number (1 = base ... 11 = tip). 0 or missing = 100%. For motors that
-// oscillate ("twitch") at the shared gain - e.g. XL330-M077 (low gear ratio,
-// factory P gain 400) under changing load. Set in local_config.h:
+// ---- GAINS PER MOTOR MODEL (chains that mix motor variants) ----
+// Every Dynamixel reports its model number (register 0), e.g. XL330-M077 =
+// 1190, XL330-M288 = 1200 (the GUI's startup diagnostics print what each
+// motor reports). MODEL_GAINS_LIST in local_config.h gives one gain set per
+// model; each motor automatically uses the set for ITS model:
+//   { model number, P level 0, P level 1, P level 2, P level 3, I gain (level 0) }
+//   #define MODEL_GAINS_LIST  {1190, 800, 450, 220, 80, 30}, {1200, 1200, 700, 350, 120, 150}
+//   (first = XL330-M077, second = XL330-M288 - one line, or end each line with a backslash)
+// A motor whose model has no entry uses STIFFNESS_P_GAINS_LIST + DROOP_I_GAIN
+// (the single-model settings above - still fine for an arm with one model).
+// MOTOR_MODEL_OVERRIDE_LIST (by motor number, 0 = use what it reports) can
+// force a motor onto another model's set.
+struct GainSet { int32_t model; int32_t p[4]; int32_t i; };
+const GainSet DEFAULT_GAIN_SET = { 0, { STIFFNESS_P_GAINS_LIST }, DROOP_I_GAIN };
+#ifdef MODEL_GAINS_LIST
+const GainSet MODEL_GAINS[] = { MODEL_GAINS_LIST };
+const int MODEL_GAINS_COUNT = sizeof(MODEL_GAINS) / sizeof(MODEL_GAINS[0]);
+#else
+const GainSet MODEL_GAINS[] = { DEFAULT_GAIN_SET };
+const int MODEL_GAINS_COUNT = 0; // no per-model sets: everyone uses the default
+#endif
+#ifndef MOTOR_MODEL_OVERRIDE_LIST
+  #define MOTOR_MODEL_OVERRIDE_LIST 0
+#endif
+const int32_t MOTOR_MODEL_OVERRIDE[NUM_MOTORS] = { MOTOR_MODEL_OVERRIDE_LIST };
+
+int32_t motorModel[NUM_MOTORS];          // what each motor reports (-1 = couldn't read)
+const GainSet* motorGains[NUM_MOTORS];   // the set it uses
+
+// The gain set for a model number (the default if it has no entry).
+const GainSet* gainSetForModel(int32_t model) {
+  for (int k = 0; k < MODEL_GAINS_COUNT; k++) if (MODEL_GAINS[k].model == model) return &MODEL_GAINS[k];
+  return &DEFAULT_GAIN_SET;
+}
+
+// Per-motor stiffness trim on top of its model's set, % by motor number
+// (1 = base ... 11 = tip). 0 or missing = 100%. For a single motor that
+// oscillates ("twitches") more than others of its model. Set in local_config.h:
 //   #define P_GAIN_PCT_LIST  100, 100, 100, 100, 100, 50, 50
 #ifndef P_GAIN_PCT_LIST
   #define P_GAIN_PCT_LIST 100
@@ -148,9 +188,16 @@ const float JOINT_MAX_DEG = 285;
 const uint8_t P_GAIN_PCT[NUM_MOTORS] = { P_GAIN_PCT_LIST };
 
 uint16_t pGainFor(int i, int level) {
+  const GainSet* gs = motorGains[i] ? motorGains[i] : &DEFAULT_GAIN_SET;
   uint16_t pct = P_GAIN_PCT[i] == 0 ? 100 : P_GAIN_PCT[i];
-  uint32_t g = (uint32_t)STIFFNESS_P_GAINS[level] * pct / 100;
-  return (uint16_t)(g < 1 ? 1 : g);
+  uint32_t g = (uint32_t)gs->p[constrain(level, 0, 3)] * pct / 100;
+  return (uint16_t)(g < 1 ? 1 : (g > 16383 ? 16383 : g));
+}
+
+// I gain at full stiffness (level 0) for motor i - from its model's set.
+uint16_t iGainFor(int i) {
+  const GainSet* gs = motorGains[i] ? motorGains[i] : &DEFAULT_GAIN_SET;
+  return (uint16_t)constrain(gs->i, 0, 16383);
 }
 
 // Leading 0 is a placeholder (not a motor number) so the array is never empty.
@@ -244,10 +291,25 @@ Dynamixel2Arduino dxl(
 // snapping to its limit for a frame, and the GUI could even take it for a hand
 // push and send the motor there. Failed reads now repeat the last good value.
 int32_t motorLastGoodRaw[NUM_MOTORS];
+
+// Present / goal position through the GENERIC register access
+// (readControlTableItem / writeControlTableItem) - NOT the library's
+// getPresentPosition() / setGoalPosition(). Those convenience functions look
+// the motor model up in the library's own range table first and silently
+// fail (or clamp to 0-4095) for models / library versions it doesn't list -
+// the same problem setGoalCurrent() / setGoalPWM() had here. The generic
+// access only needs the register address, so it works the same on every
+// XL330 variant (M077, M288, ...). Raw units, multi-turn, signed.
+int32_t readPresentRawDirect(uint8_t id) {
+  return (int32_t)dxl.readControlTableItem(ControlTableItem::PRESENT_POSITION, id);
+}
+bool writeGoalRawDirect(uint8_t id, int32_t raw) {
+  return dxl.writeControlTableItem(ControlTableItem::GOAL_POSITION, id, raw);
+}
 bool motorHaveGoodRaw[NUM_MOTORS];
 
 int32_t readPresentRaw(int i) {
-  int32_t raw = (int32_t)dxl.getPresentPosition(DXL_IDS[i], UNIT_RAW);
+  int32_t raw = readPresentRawDirect(DXL_IDS[i]);
   if (dxl.getLastLibErrCode() != DXL_LIB_OK) {
     return motorHaveGoodRaw[i] ? motorLastGoodRaw[i] : 2047; // unknown yet: report 180
   }
@@ -328,6 +390,10 @@ void enableMotor(int i) {
 float rawToDegrees(uint8_t id, int32_t rawPosition); // defined further down
 int32_t guiDegToRaw(uint8_t id, float degrees);
 
+// What the last HOLD_HERE set, for the hold check (command 239).
+int32_t motorHoldGoalRaw[NUM_MOTORS];
+bool motorHoldGoalOk[NUM_MOTORS];
+
 void holdHere(int i) {
   uint8_t id = DXL_IDS[i];
   if (dxl.readControlTableItem(ControlTableItem::HARDWARE_ERROR_STATUS, id) != 0) {
@@ -337,7 +403,7 @@ void holdHere(int i) {
   bool ok = false;
   int32_t raw = 0;
   for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-    raw = (int32_t)dxl.getPresentPosition(id, UNIT_RAW);
+    raw = readPresentRawDirect(id);
     ok = (dxl.getLastLibErrCode() == DXL_LIB_OK);
   }
   if (!ok && motorHaveGoodRaw[i]) { raw = motorLastGoodRaw[i]; ok = true; }
@@ -350,7 +416,18 @@ void holdHere(int i) {
     int32_t goal = raw;
     float deg = rawToDegrees(id, raw);
     if (deg < JOINT_MIN_DEG || deg > JOINT_MAX_DEG) goal = motorTurnBase[i] + guiDegToRaw(id, deg);
-    dxl.setGoalPosition(id, goal); // raw units (library default)
+    // Written BEFORE torque-on, so the motor never drives back to the goal
+    // it had before it was moved by hand. Read back to make sure it stuck.
+    bool wrote = false;
+    for (int attempt = 0; attempt < 3 && !wrote; attempt++) {
+      writeGoalRawDirect(id, goal);
+      int32_t g = (int32_t)dxl.readControlTableItem(ControlTableItem::GOAL_POSITION, id);
+      wrote = (dxl.getLastLibErrCode() == DXL_LIB_OK && g == goal);
+    }
+    motorHoldGoalRaw[i] = goal;
+    motorHoldGoalOk[i] = wrote;
+  } else {
+    motorHoldGoalOk[i] = false; // position unknown: goal left as it was
   }
   enableMotor(i); // gains, profile, torque on, torque limit
 }
@@ -485,9 +562,34 @@ void writeAllGoals(const byte angles[NUM_MOTORS]) {
   sw_infos.is_info_changed = true;
   if (!dxl.syncWrite(&sw_infos)) {
     for (int i = 0; i < ACTIVE_MOTORS; i++) {
-      dxl.setGoalPosition(DXL_IDS[i], sw_data[i].goal_position);
+      writeGoalRawDirect(DXL_IDS[i], sw_data[i].goal_position);
     }
   }
+}
+
+// Reads motor i's model and picks its gain set. Called from setup().
+void assignGainSet(int i) {
+  int32_t m = -1;
+  if (i < ACTIVE_MOTORS) {
+    for (int attempt = 0; attempt < 3 && m < 0; attempt++) {
+      int32_t v = (int32_t)dxl.readControlTableItem(ControlTableItem::MODEL_NUMBER, DXL_IDS[i]);
+      if (dxl.getLastLibErrCode() == DXL_LIB_OK && v > 0) m = v;
+    }
+  }
+  motorModel[i] = m;
+  int32_t use = MOTOR_MODEL_OVERRIDE[i] > 0 ? MOTOR_MODEL_OVERRIDE[i] : m;
+  motorGains[i] = gainSetForModel(use);
+}
+
+// Operating mode via the register (torque must be off). True if it reads back.
+bool setModeChecked(uint8_t id, int32_t mode) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    int32_t now = (int32_t)dxl.readControlTableItem(ControlTableItem::OPERATING_MODE, id);
+    if (dxl.getLastLibErrCode() == DXL_LIB_OK && now == mode) return true;
+    dxl.writeControlTableItem(ControlTableItem::OPERATING_MODE, id, mode);
+    delay(10);
+  }
+  return false;
 }
 
 void setup() {
@@ -519,8 +621,9 @@ void setup() {
   // Configure all motors: current-based position mode (position control
   // with a torque limit), full stiffness, 100% torque.
   for (int i = 0; i < NUM_MOTORS; i++) {
+    assignGainSet(i);             // which model is this motor -> its gains
     motorPGain[i] = pGainFor(i, 0);
-    motorIGain[i] = DROOP_I_GAIN;
+    motorIGain[i] = iGainFor(i);
     motorTorquePercent[i] = 100;
     motorTurnBase[i] = 0;
     motorLastPctRecv[i] = -1;
@@ -545,12 +648,14 @@ void setup() {
     // (torque limits then have no effect, everything else still works).
     // USE_PLAIN_POSITION_MODE (local_config.h) = the backup firmware's mode:
     // no torque limiting, but always single-turn and more forgiving.
+    // Written to the register directly and read back (same model-table
+    // reason as above - setOperatingMode() can fail silently, leaving the
+    // motor in whatever mode it was last set to). 5 = current-based
+    // position, 3 = plain position. EEPROM: only written if different.
 #ifdef USE_PLAIN_POSITION_MODE
-    dxl.setOperatingMode(motorID, OP_POSITION);
+    setModeChecked(motorID, 3);
 #else
-    if (!dxl.setOperatingMode(motorID, OP_CURRENT_BASED_POSITION)) {
-      dxl.setOperatingMode(motorID, OP_POSITION);
-    }
+    if (!setModeChecked(motorID, 5)) setModeChecked(motorID, 3);
 #endif
     enableMotor(i);
   }
@@ -560,11 +665,12 @@ void setup() {
 //  COMMAND LINK - framing + flow control (GUI <-> this sketch)
 //
 //  Every command from the GUI is:  <header> <data bytes...> <checksum>
-//    header   : always >= 240 (one of the *_HEADER constants)
-//    data     : fixed count per header (dataLenOf), every byte < 240
+//    header   : always >= HEADER_MIN (230; one of the *_HEADER constants)
+//    data     : fixed count per header (dataLenOf), every byte < HEADER_MIN
+//               (in practice <= 199: angles <= 198, percents <= 100, seq < 200)
 //    checksum : (header + all data bytes) & 0x7F
 //
-//  * Sliced / lost bytes can never be misread: a byte >= 240 where data or
+//  * Sliced / lost bytes can never be misread: a byte >= HEADER_MIN where data or
 //    the checksum is expected means the command lost bytes - it is dropped
 //    and that byte is treated as the next header. A wrong checksum drops it
 //    too. (Before, a lost byte shifted everything after it - e.g. a stray
@@ -575,6 +681,7 @@ void setup() {
 //    anything else, so only one command is ever in flight. Commands WITH a
 //    reply (all reads / status / check) are acknowledged by the reply itself.
 // =====================================================================
+const int HEADER_MIN = 230;  // was 240 until 239 (STATUS_HOLD) was added
 const byte ACK_BYTE = 0x06;
 const byte NAK_BYTE = 0x15;
 uint16_t cmdTruncated = 0, cmdBadChecksum = 0, cmdStray = 0;
@@ -597,7 +704,10 @@ int dataLenOf(byte h) {
     case STATUS_LAST_HEADER:
     case STATUS_ERR_HEADER:
     case STATUS_COUNTS_HEADER:
-    case CHECK_RECOVER_HEADER: return 1;
+    case CHECK_RECOVER_HEADER:
+    case STATUS_HOLD_HEADER:
+    case STATUS_MODEL_HEADER:
+    case STATUS_PGAIN_HEADER:  return 1;
     default:                   return -1;
   }
 }
@@ -622,7 +732,7 @@ void loop() {
   if (DEBUG_SERIAL.available() <= 0) return;
 
   // Re-sync: anything that isn't a header is a leftover from a broken command.
-  if (DEBUG_SERIAL.peek() < 240) { DEBUG_SERIAL.read(); cmdStray++; return; }
+  if (DEBUG_SERIAL.peek() < HEADER_MIN) { DEBUG_SERIAL.read(); cmdStray++; return; }
   byte header = DEBUG_SERIAL.read();
   int n = dataLenOf(header);
   if (n < 0) { cmdStray++; return; }
@@ -631,12 +741,12 @@ void loop() {
   byte sum = header;
   for (int k = 0; k < n; k++) {
     int b = peekByteWait();
-    if (b < 0 || b >= 240) { cmdTruncated++; dropCommand(header); return; } // lost bytes: a new header (left unread) arrived early
+    if (b < 0 || b >= HEADER_MIN) { cmdTruncated++; dropCommand(header); return; } // lost bytes: a new header (left unread) arrived early
     d[k] = DEBUG_SERIAL.read();
     sum += d[k];
   }
   int c = peekByteWait();
-  if (c < 0 || c >= 240) { cmdTruncated++; dropCommand(header); return; }
+  if (c < 0 || c >= HEADER_MIN) { cmdTruncated++; dropCommand(header); return; }
   DEBUG_SERIAL.read();
   if (c != (sum & 0x7F)) { cmdBadChecksum++; dropCommand(header); return; }
 
@@ -661,7 +771,7 @@ void handleCommand(byte header, const byte d[]) {
     int compressedAngle = d[1];
     int i = indexForId(dxlId);
     if (i >= 0) {
-      dxl.setGoalPosition(dxlId, goalRawFor(i, compressedAngle));
+      writeGoalRawDirect(dxlId, goalRawFor(i, compressedAngle));
     }
   }
 
@@ -707,6 +817,43 @@ void handleCommand(byte header, const byte d[]) {
     sendFrame(header, seq, values);
   }
 
+  // MODEL / GAIN DIAGNOSTICS - which model each motor is, whether
+  // local_config.h has a gain set for it, and the P gain it really runs.
+  else if (header == STATUS_MODEL_HEADER || header == STATUS_PGAIN_HEADER) {
+    byte seq = d[0];
+    int16_t values[NUM_MOTORS];
+    for (int i = 0; i < NUM_MOTORS; i++) {
+      if (i >= ACTIVE_MOTORS) { values[i] = -1; continue; }
+      if (header == STATUS_MODEL_HEADER) {
+        int32_t use = MOTOR_MODEL_OVERRIDE[i] > 0 ? MOTOR_MODEL_OVERRIDE[i] : motorModel[i];
+        bool matched = motorGains[i] != &DEFAULT_GAIN_SET || (MODEL_GAINS_COUNT == 0);
+        values[i] = (int16_t)(constrain(use, -1, 9999) + (matched ? 0 : 20000));
+      } else {
+        int32_t g = (int32_t)dxl.readControlTableItem(ControlTableItem::POSITION_P_GAIN, DXL_IDS[i]);
+        values[i] = (dxl.getLastLibErrCode() == DXL_LIB_OK) ? (int16_t)constrain(g, 0, 32000) : -1;
+      }
+    }
+    sendFrame(header, seq, values);
+  }
+
+  // HOLD CHECK - after leaving manipulation mode: is each motor really
+  // holding where HOLD_HERE put it?
+  else if (header == STATUS_HOLD_HEADER) {
+    byte seq = d[0];
+    int16_t values[NUM_MOTORS];
+    for (int i = 0; i < NUM_MOTORS; i++) {
+      if (i >= ACTIVE_MOTORS || motorLastPctRecv[i] < 0) { values[i] = -1; continue; }
+      uint8_t id = DXL_IDS[i];
+      int32_t on = (int32_t)dxl.readControlTableItem(ControlTableItem::TORQUE_ENABLE, id);
+      bool onOk = dxl.getLastLibErrCode() == DXL_LIB_OK;
+      int32_t pres = readPresentRawDirect(id);
+      bool presOk = dxl.getLastLibErrCode() == DXL_LIB_OK;
+      int32_t dev = presOk ? (int32_t)(fabs((float)(pres - motorHoldGoalRaw[i])) * 3600.0 / 4096.0) : 4999;
+      values[i] = (int16_t)((onOk && on ? 10000 : 0) + (motorHoldGoalOk[i] ? 5000 : 0) + constrain(dev, 0, 4999));
+    }
+    sendFrame(header, seq, values);
+  }
+
   // HOLD HERE - leave manipulation mode: hold the hand-posed angle exactly.
   else if (header == HOLD_HERE_HEADER) {
     int dxlId = d[0];
@@ -727,7 +874,7 @@ void handleCommand(byte header, const byte d[]) {
     int i = indexForId(dxlId);
     if (i >= 0) {
       motorPGain[i] = pGainFor(i, level);
-      motorIGain[i] = (level == 0) ? DROOP_I_GAIN : 0; // softer levels: no I term
+      motorIGain[i] = (level == 0) ? iGainFor(i) : 0; // softer levels: no I term
       dxl.writeControlTableItem(ControlTableItem::POSITION_I_GAIN, dxlId, motorIGain[i]);
       dxl.writeControlTableItem(ControlTableItem::POSITION_P_GAIN, dxlId, motorPGain[i]); // RAM item - fine with torque on
     }

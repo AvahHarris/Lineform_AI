@@ -29,6 +29,7 @@
 volatile boolean manipulationMode = false;
 
 final int HOLD_HERE_HEADER = 241;
+final int STATUS_HOLD_HEADER = 239;
 final int MANIP_READ_INTERVAL_MS = 60; // read faster while posing by hand - smoother bars
 
 // Bottom-center mode switch (logical 1600x870 coordinates). Drawn by hand
@@ -220,7 +221,59 @@ void modeExitManipulation() {
     println(m);
     chatAdd("status", m);
   }
-  if (serialConnected()) motorsDiagDueMs = millis() + 1500; // re-check torque state once things settle
+  if (serialConnected()) {
+    motorsDiagDueMs = millis() + 2500; // console diagnostics table, as before
+    thread("modesVerifyHold");          // and: is every motor REALLY holding? (chat)
+  }
+}
+
+// ~1.5 s after leaving manipulation mode: asks the firmware (239) whether
+// each motor that should hold really is - torque on, the hand-made pose
+// written as its goal, and still near it - and says so in the chat. Pins
+// down WHY a pose isn't held instead of just "it fell".
+void modesVerifyHold() {
+  delay(1500);
+  if (!serialConnected() || manipulationMode) return;
+  if (serialAckMisses >= 3) {
+    motorsPostToChat("error", "Hold check: the Arduino isn't acknowledging commands - it runs OLD firmware, which doesn't "
+      + "know HOLD_HERE (241), so the motors stay limp. Upload firmware/lineform-ai/lineform-ai.ino.", false);
+    return;
+  }
+  float[] st = readAllMotorValues(STATUS_HOLD_HEADER, 1.0);
+  if (st == null) {
+    motorsPostToChat("error", "Hold check: no answer to command 239 - the Arduino runs older firmware. Upload "
+      + "firmware/lineform-ai/lineform-ai.ino (needed for holding the pose after manipulation mode).", false);
+    return;
+  }
+  ArrayList<String> off = new ArrayList<String>(), noGoal = new ArrayList<String>(), drift = new ArrayList<String>();
+  int checked = 0;
+  float worst = 0;
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    if (!rowActive(i + 2) || !motorPowerOn(i) || motorTorquePct[i] == 0) continue; // limp on purpose
+    int v = round(st[i]);
+    if (v < 0) continue;
+    checked++;
+    boolean on = v >= 10000;
+    boolean goalOk = (v % 10000) >= 5000;
+    float dev = (v % 5000) / 10.0;
+    String m = "motor " + displayId(i + 2);
+    if (!on) off.add(m);
+    else if (!goalOk) noGoal.add(m);
+    else if (dev > 5) drift.add(m + " (" + nf(dev, 1, 1) + "\u00B0)");
+    if (on && goalOk) worst = max(worst, dev);
+  }
+  if (off.isEmpty() && noGoal.isEmpty() && drift.isEmpty()) {
+    println("Hold check: all " + checked + " motors holding (within " + nf(worst, 1, 1) + " deg of the hand-made pose).");
+    return;
+  }
+  String msg = "Hold check after leaving manipulation mode:";
+  if (!off.isEmpty()) msg += " TORQUE OFF on " + String.join(", ", off) + " (didn't turn back on - press Reset; if it repeats, check power/cable).";
+  if (!noGoal.isEmpty()) msg += " The hand-made pose could NOT be written as the goal of " + String.join(", ", noGoal)
+    + " - they may have driven back to their old pose.";
+  if (!drift.isEmpty()) msg += " Drifted away from the pose: " + String.join(", ", drift)
+    + " - too weak/soft for the load (raise the torque bar or stiffness), or pulled back to a joint limit.";
+  println("!!! " + msg);
+  motorsPostToChat("error", msg, false);
 }
 
 // Shows / hides / locks the left-panel controls for the current mode.

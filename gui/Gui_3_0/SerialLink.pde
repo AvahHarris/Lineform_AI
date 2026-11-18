@@ -3,7 +3,8 @@
 //  (Matches the "COMMAND LINK" section of lineform-ai.ino.)
 //
 //  Each command goes out as:  <header> <data bytes...> <checksum>
-//    header >= 240, every data byte < 240, checksum = (header + data) & 0x7F
+//    header >= 230, every data byte < 230, checksum = (header + data) & 0x7F
+//    (230 = HEADER_MIN in the firmware; was 240 until header 239 was added)
 //  so the firmware can detect lost / sliced bytes and drop the broken
 //  command instead of misreading it.
 //
@@ -32,7 +33,7 @@ int serialNakCount = 0, serialAckTimeouts = 0;
 int serialDataLen(int h) {
   if (h == 255) return MOTOR_COUNT;                    // all goals
   if (h == 254 || h == 252 || h == 251 || h == 249 || h == 241) return 2;
-  if (h == 253 || h == 250 || h == 248 || (h >= 242 && h <= 247) || h == 240) return 1;
+  if (h == 253 || h == 250 || h == 248 || (h >= 242 && h <= 247) || (h >= 237 && h <= 240)) return 1;
   return -1;
 }
 
@@ -63,12 +64,12 @@ void serialLinkSend(int[] bytes) {
 }
 
 void serialSendOne(int[] cmd) {
-  // Data must stay below 240 or the firmware would take it for a header.
+  // Data must stay below 230 or the firmware would take it for a header.
   int sum = 0;
   for (int j = 0; j < cmd.length; j++) {
-    if (j > 0 && (cmd[j] < 0 || cmd[j] >= 240)) {
+    if (j > 0 && (cmd[j] < 0 || cmd[j] >= 230)) {
       println("[serial] data byte " + cmd[j] + " out of range in command " + cmd[0] + " - clamped");
-      cmd[j] = constrain(cmd[j], 0, 239);
+      cmd[j] = constrain(cmd[j], 0, 229);
     }
     sum += cmd[j];
   }

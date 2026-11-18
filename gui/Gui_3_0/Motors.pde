@@ -1010,8 +1010,12 @@ void motorsRunDiagnostics() {
       + " | last 251: " + motorsLastTlText());
   }
   println("DIAGNOSTICS (firmware answered):");
-  println("  motor | mode            | torque | error | goal PWM % | goal current % | GUI torque % | firmware's last torque write");
+  // Which model each motor is and the P gain it really runs (238 / 237).
+  float[] models = readAllMotorValues(STATUS_MODEL_HEADER, 1.0);
+  float[] pgains = readAllMotorValues(STATUS_PGAIN_HEADER, 1.0);
+  println("  motor | model                  | P gain | mode            | torque | error | goal PWM % | goal current % | GUI torque % | firmware's last torque write");
   int plainMode = 0, errors = 0, off = 0, active = 0;
+  ArrayList<String> unmatched = new ArrayList<String>();
   for (int i = 0; i < MOTOR_COUNT; i++) {
     int v = round(st[i]);
     String n = nf(displayId(i + 2), 2);
@@ -1022,12 +1026,40 @@ void motorsRunDiagnostics() {
     if (mode != 5) plainMode++;
     if (err != 0) errors++;
     if (on == 0) off++;
-    println("  " + n + "    | " + modeName + "| " + (on == 1 ? "ON " : "OFF") + "    | " + nf(err, 2) + "    | "
+    String modelText = "?                     ";
+    if (models != null) {
+      int mv = round(models[i]);
+      boolean noSet = mv >= 19999;            // firmware adds 20000 when no set matched (-1 + 20000 = unreadable)
+      int model = noSet ? mv - 20000 : mv;
+      modelText = (motorModelName(model) + (noSet ? " (default!)" : "") + "                      ").substring(0, 22);
+      if (noSet) unmatched.add("motor " + displayId(i + 2) + " = " + motorModelName(model));
+    }
+    String pText = pgains == null || pgains[i] < 0 ? "?     " : nf(round(pgains[i]), 5) + " ";
+    println("  " + n + "    | " + modelText + " | " + pText + " | " + modeName + "| " + (on == 1 ? "ON " : "OFF") + "    | " + nf(err, 2) + "    | "
       + (pwm == null ? "?" : nf(pwm[i], 1, 1)) + "       | " + (cur == null ? "?" : nf(cur[i], 1, 1))
       + "           | " + motorTorquePct[i] + "   | " + motorsDiagLastText(i));
   }
+  if (models == null) println("  (model / P gain columns need the latest firmware - commands 237/238)");
+  if (!unmatched.isEmpty()) println("  NOTE: no MODEL_GAINS_LIST entry in firmware local_config.h for " + String.join(", ", unmatched)
+    + " - they use the default STIFFNESS_P_GAINS_LIST / DROOP_I_GAIN.");
   println("  -> " + active + " motors answered; " + plainMode + " not in current-based mode; "
     + errors + " with a hardware error; " + off + " with torque OFF.");
+}
+
+final int STATUS_MODEL_HEADER = 238;
+final int STATUS_PGAIN_HEADER = 237;
+
+// Name for a Dynamixel model number (as reported by the motor); unknown
+// numbers are shown as "model N". Only used for the console table.
+String motorModelName(int model) {
+  if (model < 0) return "unreadable";
+  if (model == 1190) return "XL330-M077";
+  if (model == 1200) return "XL330-M288";
+  if (model == 1210) return "XC330-T181";
+  if (model == 1220) return "XC330-T288";
+  if (model == 1230) return "XC330-M181";
+  if (model == 1240) return "XC330-M288";
+  return "model " + model;
 }
 
 // "fw got 13%, PWM ok, cur ok" / "fw got nothing" / "...PWM FAILED e3"
