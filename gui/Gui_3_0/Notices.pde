@@ -7,7 +7,7 @@
 //  * noticeAdd(kind, text) - "error" (red) or "status" (neutral). Safe to
 //    call from any thread. Also printed to the console.
 //  * The overload warning (when the overload trip is enabled and fires)
-//    is PINNED at the top of the panel until you switch back to AI mode.
+//    is PINNED at the top of the panel until you switch back to Automation mode.
 //  * Status notices fade out after NOTICE_STATUS_MS, errors after
 //    NOTICE_ERROR_MS. Click the panel to clear them.
 //  * Only the newest NOTICE_MAX are kept; the panel grows upward from the
@@ -25,7 +25,7 @@ final int NOTICE_MAX = 4;
 final int NOTICE_STATUS_MS = 15000;
 final int NOTICE_ERROR_MS = 90000;
 final float NOTICE_X = 8;
-final float NOTICE_W = 540;     // ends left of the AI / manipulation mode switch (x 560)
+final float NOTICE_W = 540;     // ends left of the Automation / Manipulation mode switch (x 560)
 final float NOTICE_BOTTOM = 862;
 final float NOTICE_TEXT = 13;
 // Where the panel was last drawn (logical coords), for clicks.
@@ -72,7 +72,7 @@ void drawNoticePanel(float topLimit) {
   }
   String pinned = overloadWarning;
   if (pinned != null) list.add(new Notice("pinned", "!! " + pinned
-    + " Check what the arm is pushing against before switching back to AI mode."));
+    + " Check what the arm is pushing against before switching back to Automation mode."));
   if (list.isEmpty()) return;
 
   pushStyle();

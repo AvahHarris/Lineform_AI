@@ -82,7 +82,12 @@ void drawlineform3d() {
     pushMatrix();
     translate(LINK_BOX_CENTER_X, 0, 0);
     color c = !fitted ? THEME_LINK_PASSIVE : (motorNumber % 2 == 1 ? THEME_LINK_A : THEME_LINK_B);
-    drawLinkBlock(motorNumber, c, "" + displayId(dxlId)); // real ID: 2 next to the base ... 12 at the tip
+    color labelColor = color(255);
+    if (fitted && loadColorsActive()) {   // load heat-map (2026-11-19)
+      c = loadColor(blockLoadShown(i));
+      labelColor = loadLabelColor(c);
+    }
+    drawLinkBlock(motorNumber, c, "" + displayId(dxlId), labelColor); // real ID: 2 next to the base ... 12 at the tip
 
     // Record this block's actual centre in world space, so the curve runs
     // straight through the blocks.
@@ -178,6 +183,10 @@ void drawlineform3d() {
 // n+1 bends about Z when n+1 is odd, about Y when it is even. So
 // consecutive blocks are turned 90 deg to each other, like the real arm.
 void drawLinkBlock(int n, color c, String label) {
+  drawLinkBlock(n, c, label, color(255));
+}
+
+void drawLinkBlock(int n, color c, String label, color labelColor) {
   boolean nextAboutZ = (n + 1) % 2 == 1;
   float sy = nextAboutZ ? LINK_THICK : LINK_THIN;
   float sz = nextAboutZ ? LINK_THIN : LINK_THICK;
@@ -187,7 +196,7 @@ void drawLinkBlock(int n, color c, String label) {
   box(LINK_WIDTH, sy, sz);
   pushMatrix();
   translate(0, 0, sz / 2.0 + 1); // front face, for the number
-  fill(255);
+  fill(labelColor);
   textAlign(CENTER, CENTER);
   textSize(16);
   text(label, 0, 0);
@@ -223,5 +232,124 @@ void drawLinkBridge(int j) {
   if (aboutZ) box(plateT, plateW, 2 * off + plateT);
   else box(plateT, 2 * off + plateT, plateW);
   popMatrix();
+  popStyle();
+}
+
+// =====================================================================
+//  LOAD HEAT-MAP on the 3D motor blocks (2026-11-19)
+//  Like a load simulation: each fitted motor block is colored by its live
+//  torque use (the same % as the white line on its bar, 0-100% of its
+//  Current Limit): blue (no load) -> cyan -> green -> yellow -> RED (full
+//  load). Shown in Automation mode whenever live loads are being read; in
+//  Manipulation mode (motors limp), offline, or with "load_colors_3d": false
+//  in local_config.json, the blocks keep their normal colors.
+// =====================================================================
+boolean LOAD_COLORS_3D = true; // switched at runtime by the LOAD COLORS switch (top-right of the 3D view)
+final float LOAD_COLOR_SMOOTHING = 0.25;  // per frame, 0..1 - higher = follows faster, lower = less flicker
+float[] blockLoadSmoothed = new float[MOTOR_COUNT];
+int blockLoadFrame = -1;
+
+boolean loadColorsActive() {
+  return LOAD_COLORS_3D && !manipulationMode && serialConnected() && motorLoadPct != null;
+}
+
+// Smoothed load % of block i (updated once per frame).
+float blockLoadShown(int i) {
+  if (blockLoadFrame != frameCount) {
+    blockLoadFrame = frameCount;
+    float[] loads = motorLoadPct;
+    for (int k = 0; k < MOTOR_COUNT; k++) {
+      float target = (loads == null) ? 0 : constrain(loads[k], 0, 100);
+      blockLoadSmoothed[k] = lerp(blockLoadSmoothed[k], target, LOAD_COLOR_SMOOTHING);
+    }
+  }
+  return blockLoadSmoothed[i];
+}
+
+final color[] LOAD_STOPS = {
+  color(40, 90, 255),   //   0 %  blue
+  color(0, 200, 255),   //  25 %  cyan
+  color(40, 210, 90),   //  50 %  green
+  color(255, 215, 0),   //  75 %  yellow
+  color(255, 35, 35)    // 100 %  red
+};
+
+color loadColor(float pct) {
+  float t = constrain(pct / 100.0, 0, 1) * (LOAD_STOPS.length - 1);
+  int k = min(floor(t), LOAD_STOPS.length - 2);
+  return lerpColor(LOAD_STOPS[k], LOAD_STOPS[k + 1], t - k);
+}
+
+// Dark number on light (yellow / green / cyan) blocks, white on dark ones.
+color loadLabelColor(color c) {
+  float lum = 0.299 * red(c) + 0.587 * green(c) + 0.114 * blue(c);
+  return lum > 150 ? color(20) : color(255);
+}
+
+// ---- LOAD COLORS switch + color key, top-right of the 3D view (HUD) ----
+// Click the switch to turn the heat-map on / off at any time (e.g. to watch
+// an animation in the normal colors). Starts as "load_colors_3d" in
+// local_config.json says. Shown in Automation mode; the color key only
+// while the heat-map is actually on and live loads are coming in.
+final float LOADSW_X = 960, LOADSW_Y = 14, LOADSW_W = 205, LOADSW_H = 26;
+
+boolean loadSwitchVisible() { return !manipulationMode; }
+
+boolean loadSwitchMouseOver() {
+  return loadSwitchVisible()
+      && mouseX >= uiX(LOADSW_X) && mouseX <= uiX(LOADSW_X + LOADSW_W)
+      && mouseY >= uiY(LOADSW_Y) && mouseY <= uiY(LOADSW_Y + LOADSW_H);
+}
+
+// Called from mousePressed(). Returns true if the switch was clicked.
+boolean loadSwitchMousePressed() {
+  if (!loadSwitchMouseOver()) return false;
+  LOAD_COLORS_3D = !LOAD_COLORS_3D;
+  println("3D load colors " + (LOAD_COLORS_3D ? "ON" : "OFF"));
+  return true;
+}
+
+void drawLoadLegend() {
+  if (!loadSwitchVisible()) return;
+  pushStyle();
+  boolean on = LOAD_COLORS_3D;
+  boolean hover = loadSwitchMouseOver();
+  float x = LOADSW_X, y = LOADSW_Y, w = LOADSW_W, h = LOADSW_H, pad = 8;
+
+  // the switch: caption left, ON/OFF pill right
+  themePanel(x, y, w, h);
+  textFont(uiBoldFont(max(7, round(11 * uiScale))));
+  textAlign(LEFT, CENTER);
+  fill(THEME_TEXT);
+  hudText("LOAD COLORS (3D)", x + pad, y + h / 2.0);
+  float pw = 52, ph = h - 8, px = x + w - pad - pw, py = y + 4;
+  noStroke();
+  color pill = on ? loadColor(100) : THEME_CTRL_BG;
+  fill(hover ? themeShade(pill, on ? -0.15 : 0.25) : pill);
+  rect(uiX(px), uiY(py), pw * uiScale, ph * uiScale, ph / 2.0 * uiScale);
+  fill(on ? color(255) : THEME_MUTED);
+  textAlign(CENTER, CENTER);
+  hudText(on ? "ON" : "OFF", px + pw / 2.0, py + ph / 2.0);
+
+  // the color key, under the switch, while the heat-map is really showing
+  if (loadColorsActive()) {
+    float ky = y + h + 4, kh = 34;
+    themePanel(x, ky, w, kh);
+    float bx = x + pad, by = ky + 7, bw = w - 2 * pad, bh = 9;
+    int steps = 40;
+    for (int s = 0; s < steps; s++) {
+      fill(loadColor(100.0 * s / (steps - 1)));
+      rect(uiX(bx + bw * s / steps), uiY(by), bw / steps * uiScale + 1, bh * uiScale);
+    }
+    textFont(hudFont);
+    hudTextSize(10);
+    fill(THEME_MUTED);
+    textAlign(LEFT, TOP);
+    hudText("0%", bx, by + bh + 1);
+    textAlign(CENTER, TOP);
+    hudText("50% of full torque", bx + bw / 2, by + bh + 1);
+    textAlign(RIGHT, TOP);
+    hudText("100%", bx + bw, by + bh + 1);
+  }
   popStyle();
 }

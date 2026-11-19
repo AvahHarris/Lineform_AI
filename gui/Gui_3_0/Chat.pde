@@ -228,7 +228,7 @@ color chatTagColor(String who) {
 }
 
 void drawChatPanel() {
-  if (manipulationMode) return; // hidden in manipulation mode (Modes.pde)
+  if (manipulationMode) return; // hidden in Manipulation mode (Modes.pde)
   pushStyle();
 
   // Panel background + header
@@ -399,7 +399,7 @@ void chatSubmit() {
   String msg = chatInput.getText();
   if (msg == null || msg.trim().length() == 0) return;
   if (manipulationMode) {
-    noticeAdd("status", "Manipulation mode is on (motors OFF). Switch back to AI mode to ask for shapes or animations.");
+    noticeAdd("status", "Manipulation mode is on (motors OFF). Switch back to Automation mode to ask for shapes or animations.");
     return;
   }
   if (chatBusy) {

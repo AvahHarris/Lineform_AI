@@ -7,5 +7,6 @@
   "overload_trip_pct": 95,
   "overload_confirm_readings": 2,
   "twitch_guard": false,
-  "follow_hand_moves": true
+  "follow_hand_moves": true,
+  "load_colors_3d": true
 }

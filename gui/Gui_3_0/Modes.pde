@@ -1,12 +1,12 @@
 // =====================================================================
-//  MODES - AI mode (normal) vs. MANIPULATION mode.
+//  MODES - Automation mode (normal) vs. Manipulation mode.
 //
 //  The switch at the bottom of the window flips between them.
 //
-//  MANIPULATION mode
+//  Manipulation mode
 //    * every motor's torque is OFF - the arm is limp, pose it by hand
 //    * the angle bars and the 3D view follow the REAL angles, every reading,
-//      with none of the AI-mode filters (no 45 deg glitch filter, no
+//      with none of the Automation-mode filters (no 45 deg glitch filter, no
 //      hand-move threshold, no "pending value" hold, no snap-to-goal)
 //    * nothing that could move a motor is sent: Create Shape / Reset are
 //      hidden, the bars can't be dragged, chat requests and animations are
@@ -14,12 +14,12 @@
 //    * Save Shape still works - pose the arm by hand, then save it
 //    * warm amber colors (Theme.pde) so it is obvious the motors are off
 //
-//  Back to AI mode
+//  Back to Automation mode
 //    * each motor holds EXACTLY where it was left (firmware command 241
 //      HOLD_HERE: goal = its raw present position, then torque on), at the
 //      torque % and ON/OFF state its row had before - rows that were OFF or
-//      at 0% stay limp, just like in AI mode
-//    * the AI-mode hold logic then takes over as usual: it waits for the
+//      at 0% stay limp, just like in Automation mode
+//    * the Automation-mode hold logic then takes over as usual: it waits for the
 //      motor to settle (gravity sag is accepted as the new rest point, the
 //      I term pulls most of it back) and only a real push moves it
 //
@@ -34,7 +34,7 @@ final int MANIP_READ_INTERVAL_MS = 60; // read faster while posing by hand - smo
 
 // Bottom-center mode switch (logical 1600x870 coordinates). Drawn by hand
 // (not a ControlP5 toggle) as a wide two-half switch, like the ANGLE/TORQUE
-// switches: left half "AI MODE" in blue, right half "MANIPULATION" in amber.
+// switches: left half "AUTOMATION" in blue, right half "MANIPULATION" in amber.
 // The active half is bright with an outline; the other half is dimmed.
 // Click a half to pick that mode.
 final float MODE_PANEL_X = 560;
@@ -45,7 +45,7 @@ final float MODE_SWITCH_W = 420;
 final float MODE_SWITCH_H = 38;
 final float MODE_SWITCH_X = MODE_PANEL_X + (MODE_PANEL_W - MODE_SWITCH_W) / 2.0;
 final float MODE_SWITCH_Y = MODE_PANEL_Y + (MODE_PANEL_H - MODE_SWITCH_H) / 2.0;
-final color MODE_AI_COLOR    = color(64, 140, 255);  // blue  (= THEME_BLUE)
+final color MODE_AUTOMATION_COLOR    = color(64, 140, 255);  // blue  (= THEME_BLUE)
 final color MODE_MANIP_COLOR = color(255, 150, 50);  // amber (= THEME_ORANGE, like the TORQUE half)
 
 boolean modesMouseOver() {
@@ -63,12 +63,12 @@ boolean modesMousePressed() {
 }
 
 // ---------------------------------------------------------------------
-//  OVERLOAD PROTECTION (AI mode). If any powered motor's live torque use
+//  OVERLOAD PROTECTION (Automation mode). If any powered motor's live torque use
 //  (the white line - % of its full-strength Current Limit) reaches
-//  OVERLOAD_TRIP_PCT, the GUI switches to manipulation mode (all torque
+//  OVERLOAD_TRIP_PCT, the GUI switches to Manipulation mode (all torque
 //  OFF) and shows a warning. Works for every row, whether it shows its
-//  ANGLE or TORQUE bar - loads are read every cycle in AI mode.
-//  ON (this is what switches to manipulation mode automatically). Override
+//  ANGLE or TORQUE bar - loads are read every cycle in Automation mode.
+//  ON (this is what switches to Manipulation mode automatically). Override
 //  in local_config.json: "overload_trip_pct" (default 95; 0 = off),
 //  "overload_confirm_readings" (readings in a row, ~120 ms apart, needed to
 //  trip; 1 = first reading). The warning is pinned in the bottom-left
@@ -78,7 +78,7 @@ float OVERLOAD_TRIP_PCT = 95; // 0 = off
 int OVERLOAD_CONFIRM_READINGS = 2;
 int[] overloadCount = new int[MOTOR_COUNT];
 int overloadLastSeq = -1;
-String overloadWarning = null; // shown in manipulation mode after a trip; cleared on return to AI mode
+String overloadWarning = null; // shown in Manipulation mode after a trip; cleared on return to Automation mode
 
 // Called every frame from motorsTick().
 void modesCheckOverload() {
@@ -112,7 +112,7 @@ void modesCheckOverload() {
 }
 
 // ---------------------------------------------------------------------
-//  Safety net: while in manipulation mode only READ commands and
+//  Safety net: while in Manipulation mode only READ commands and
 //  torque-OFF may reach the Arduino. Called by sendSerialBytes().
 // ---------------------------------------------------------------------
 boolean serialAllowedInManipulation(int[] bytes) {
@@ -127,7 +127,7 @@ boolean serialAllowedInManipulation(int[] bytes) {
 }
 
 // ---------------------------------------------------------------------
-//  Entering / leaving manipulation mode (drawing thread)
+//  Entering / leaving Manipulation mode (drawing thread)
 // ---------------------------------------------------------------------
 void modeEnterManipulation() {
   if (manipulationMode) return;
@@ -147,7 +147,7 @@ void modeEnterManipulation() {
   for (int k = 0; k < frame.length; k++) frame[k] = off.get(k);
   sendSerialBytes(frame);
 
-  // Forget every AI-mode hold / drag / pending state.
+  // Forget every Automation-mode hold / drag / pending state.
   for (int i = 0; i < MOTOR_COUNT; i++) {
     motorDragPending[i] = false;
     motorTorquePending[i] = false;
@@ -162,7 +162,7 @@ void modeEnterManipulation() {
   themeApplyMode();
   println("MANIPULATION MODE: all motors torque OFF - move the arm by hand.");
   noticeAdd("status", "Manipulation mode: all motors are OFF. Move the arm by hand - the bars show the real angles. "
-    + "Switch back to AI mode to hold the pose. (Any unsent bar values were dropped.)");
+    + "Switch back to Automation mode to hold the pose. (Any unsent bar values were dropped.)");
 }
 
 void modeExitManipulation() {
@@ -187,7 +187,7 @@ void modeExitManipulation() {
     motorsDisplay(i, deg);           // bar = this pose, not "pending"
 
     // This pose is now the motor's goal - exactly like right after a sent goal,
-    // so the AI-mode hold logic (settle, rest baseline, push detection) restarts.
+    // so the Automation-mode hold logic (settle, rest baseline, push detection) restarts.
     // (Clamped: a joint left past 0/180 is pulled back to the limit - the
     // firmware's HOLD_HERE does the same.)
     motorLastSentDeg[i] = clampJoint(deg);
@@ -199,7 +199,7 @@ void modeExitManipulation() {
     motorPushCount[i] = 0;
     motorJumpSeen[i] = false;
 
-    // Same ON/OFF and torque % the row had in AI mode.
+    // Same ON/OFF and torque % the row had in Automation mode.
     boolean hold = motorPowerOn(i) && motorTorquePct[i] > 0;
     if (hold) {
       sendSerialBytes(HOLD_HERE_HEADER, hwId(rowId), motorTorquePct[i]);
@@ -217,8 +217,8 @@ void modeExitManipulation() {
 
   modesApplyControls();
   themeApplyMode();
-  println("AI MODE: " + held + " motors holding the hand-posed angles" + (limp > 0 ? ", " + limp + " left limp (OFF / 0%)" : "") + ".");
-  noticeAdd("status", "AI mode: the arm holds the pose you made" + (limp > 0 ? " (" + limp + " motor(s) stay limp - switched OFF or at 0% torque)" : "") + ".");
+  println("AUTOMATION MODE: " + held + " motors holding the hand-posed angles" + (limp > 0 ? ", " + limp + " left limp (OFF / 0%)" : "") + ".");
+  noticeAdd("status", "Automation mode: the arm holds the pose you made" + (limp > 0 ? " (" + limp + " motor(s) stay limp - switched OFF or at 0% torque)" : "") + ".");
   if (pastLimit.length() > 0) {
     String m = "Moved back inside the " + jointRangeText() + " range: " + pastLimit + ".";
     println(m);
@@ -230,7 +230,7 @@ void modeExitManipulation() {
   }
 }
 
-// ~1.5 s after leaving manipulation mode: asks the firmware (239) whether
+// ~1.5 s after leaving Manipulation mode: asks the firmware (239) whether
 // each motor that should hold really is - torque on, the hand-made pose
 // written as its goal, and still near it - and says so in the chat. Pins
 // down WHY a pose isn't held instead of just "it fell".
@@ -245,7 +245,7 @@ void modesVerifyHold() {
   float[] st = readAllMotorValues(STATUS_HOLD_HEADER, 1.0);
   if (st == null) {
     motorsPostNotice("error", "Hold check: no answer to command 239 - the Arduino runs older firmware. Upload "
-      + "firmware/lineform-ai/lineform-ai.ino (needed for holding the pose after manipulation mode).", false);
+      + "firmware/lineform-ai/lineform-ai.ino (needed for holding the pose after Manipulation mode).", false);
     return;
   }
   ArrayList<String> off = new ArrayList<String>(), noGoal = new ArrayList<String>(), drift = new ArrayList<String>();
@@ -269,7 +269,7 @@ void modesVerifyHold() {
     println("Hold check: all " + checked + " motors holding (within " + nf(worst, 1, 1) + " deg of the hand-made pose).");
     return;
   }
-  String msg = "Hold check after leaving manipulation mode:";
+  String msg = "Hold check after leaving Manipulation mode:";
   if (!off.isEmpty()) msg += " TORQUE OFF on " + String.join(", ", off) + " (didn't turn back on - press Reset; if it repeats, check power/cable).";
   if (!noGoal.isEmpty()) msg += " The hand-made pose could NOT be written as the goal of " + String.join(", ", noGoal)
     + " - they may have driven back to their old pose.";
@@ -308,7 +308,7 @@ void modesApplyControls() {
 }
 
 // ---------------------------------------------------------------------
-//  Live readings in manipulation mode (called from motorsTick())
+//  Live readings in Manipulation mode (called from motorsTick())
 // ---------------------------------------------------------------------
 void modesManipulationTick(long now) {
   for (int i = 0; i < MOTOR_COUNT; i++) {
@@ -353,8 +353,8 @@ void drawModeSwitchPanel() {
   boolean hoverRight = hover && mouseX >= uiX(MODE_SWITCH_X + half);
   noStroke();
   // left = AI (blue)
-  color aiFill = !m ? MODE_AI_COLOR : themeShade(MODE_AI_COLOR, (hover && !hoverRight) ? -0.45 : -0.65);
-  fill(aiFill);
+  color autoFill = !m ? MODE_AUTOMATION_COLOR : themeShade(MODE_AUTOMATION_COLOR, (hover && !hoverRight) ? -0.45 : -0.65);
+  fill(autoFill);
   rect(uiX(MODE_SWITCH_X), uiY(MODE_SWITCH_Y), half * uiScale, MODE_SWITCH_H * uiScale, r, 0, 0, r);
   // right = MANIPULATION (amber)
   color mnFill = m ? MODE_MANIP_COLOR : themeShade(MODE_MANIP_COLOR, (hover && hoverRight) ? -0.45 : -0.65);
@@ -374,7 +374,7 @@ void drawModeSwitchPanel() {
   textAlign(CENTER, CENTER);
   float cy = MODE_SWITCH_Y + MODE_SWITCH_H / 2.0;
   fill(!m ? color(15, 20, 35) : color(150, 170, 210));
-  hudText((!m ? "● " : "") + "AI MODE", MODE_SWITCH_X + half / 2.0, cy);
+  hudText((!m ? "● " : "") + "AUTOMATION", MODE_SWITCH_X + half / 2.0, cy);
   fill(m ? color(40, 22, 5) : color(215, 165, 110));
   hudText((m ? "● " : "") + "MANIPULATION", MODE_SWITCH_X + half * 1.5, cy);
   popStyle();
@@ -395,7 +395,7 @@ void drawModeSwitchPanel() {
   textFont(hudFont);
   hudTextSize(13);
   fill(THEME_TEXT);
-  hudText("Move the arm by hand. Switch back to AI mode to hold this pose.", bx + bw / 2, by + 34);
+  hudText("Move the arm by hand. Switch back to Automation mode to hold this pose.", bx + bw / 2, by + 34);
 
   // (The overload warning is no longer drawn here: every warning sits in
   // the bottom-left notice panel - Notices.pde.)
@@ -415,6 +415,6 @@ void drawManipulationHint() {
   hudTextSize(13);
   fill(THEME_TEXT);
   hudText("Bars show the real angles. Save Shape saves as \"hand pose <time>\".", SLIDER_X, y + 28);
-  hudText("Create Shape / Reset return in AI mode.", SLIDER_X, y + 46);
+  hudText("Create Shape / Reset return in Automation mode.", SLIDER_X, y + 46);
   popStyle();
 }

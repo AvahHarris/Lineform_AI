@@ -4,7 +4,7 @@
 // =====================================================================
 
 // Background and panels. NOT final: these (and the 3D link colors and
-// THEME_ACCENT below) switch between the AI-mode set and the
+// THEME_ACCENT below) switch between the Automation-mode set and the
 // manipulation-mode set - see themeApplyMode().
 color THEME_BG                 = color(13, 17, 31);        // deep navy behind the 3D arm
 color THEME_PANEL              = color(24, 30, 50, 230);   // backing panels
@@ -32,7 +32,7 @@ color THEME_LINK_A             = color(78, 90, 122);       // odd links
 color THEME_LINK_B             = color(80, 155, 255);      // even links
 final color THEME_LINK_PASSIVE = color(55, 60, 75);        // the fixed passive block
 
-// Angle-bar fill / mode accent (cyan in AI mode, amber in manipulation mode)
+// Angle-bar fill / mode accent (cyan in Automation mode, amber in Manipulation mode)
 color THEME_ACCENT             = color(0, 200, 255);
 
 // ---- Manipulation-mode color set: warm amber on dark brown, so it is
@@ -44,7 +44,7 @@ final color MANIP_ACCENT       = color(255, 170, 40);      // amber
 final color MANIP_LINK_A       = color(130, 85, 45);
 final color MANIP_LINK_B       = color(255, 160, 50);
 
-// ---- AI-mode color set (the original theme) ----
+// ---- Automation-mode color set (the original theme) ----
 final color AI_BG              = color(13, 17, 31);
 final color AI_PANEL           = color(24, 30, 50, 230);
 final color AI_PANEL_EDGE      = color(62, 76, 120);
@@ -53,7 +53,7 @@ final color AI_LINK_A          = color(78, 90, 122);
 final color AI_LINK_B          = color(80, 155, 255);
 
 // Switches the mode-dependent colors and re-colors the angle bars.
-// Called from applyTheme() and whenever the AI / manipulation switch flips.
+// Called from applyTheme() and whenever the Automation / Manipulation switch flips.
 void themeApplyMode() {
   boolean m = manipulationMode;
   THEME_BG         = m ? MANIP_BG : AI_BG;
@@ -172,7 +172,7 @@ void applyTheme() {
 
   chatSetMode(chatMode); // re-color the Shape / Animate switch
   chatSetCritic(chatCriticOn); // and the Critic: ON/OFF button
-  themeApplyMode();      // AI / manipulation colors (angle bars, backdrops, 3D links)
+  themeApplyMode();      // Automation / Manipulation colors (angle bars, backdrops, 3D links)
 }
 
 // Rounded backing panel in logical (1600x870) coordinates.
@@ -188,7 +188,7 @@ void themePanel(float x, float y, float w, float h) {
 // Drawn first in the HUD, so the controls and text sit on top of them.
 void drawThemeBackdrops() {
   // Left column: motors, torque switches and the buttons under them
-  themePanel(8, 8, 500, 600);
+  themePanel(8, 8, 540, 600); // wider for the longer bars (was 500)
 
 }
 

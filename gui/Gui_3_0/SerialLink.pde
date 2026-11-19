@@ -56,7 +56,7 @@ void serialLinkSend(int[] bytes) {
 
     // Manipulation mode (Modes.pde): only reads and torque-OFF may go out.
     if (manipulationMode && !serialAllowedInManipulation(cmd)) {
-      println("[manipulation mode] blocked serial command " + h);
+      println("[Manipulation mode] blocked serial command " + h);
       continue;
     }
     serialSendOne(cmd);

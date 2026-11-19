@@ -32,7 +32,7 @@ const byte STATUS_LAST_HEADER   = 244; // + seq                   -> framed repl
 const byte STATUS_COUNTS_HEADER = 242; // + seq                   -> framed reply: [0] seconds since boot, [1..] commands received per type (see below)
 const byte STATUS_ERR_HEADER    = 243; // + seq                   -> framed reply: 11 x lib error code of the last PWM write*100 + of the last current write
 const byte HOLD_HERE_HEADER     = 241; // + id + percent 0-100    -> goal = EXACT present position, then torque on at percent (0 = stay limp)
-                                       //    Used when the GUI leaves MANIPULATION mode: the arm keeps the pose it was
+                                       //    Used when the GUI leaves Manipulation mode: the arm keeps the pose it was
                                        //    moved to by hand, with no 1.44 deg angle-byte rounding and no turn guessing.
 const byte STATUS_PGAIN_HEADER  = 237; // + seq                   -> framed reply: 11 x Position P Gain read back FROM the motor (-1 = n/a)
 const byte STATUS_MODEL_HEADER  = 238; // + seq                   -> framed reply: 11 x model number the motor reports
@@ -839,7 +839,7 @@ void handleCommand(byte header, const byte d[]) {
     sendFrame(header, seq, values);
   }
 
-  // HOLD CHECK - after leaving manipulation mode: is each motor really
+  // HOLD CHECK - after leaving Manipulation mode: is each motor really
   // holding where HOLD_HERE put it?
   else if (header == STATUS_HOLD_HEADER) {
     byte seq = d[0];
@@ -857,7 +857,7 @@ void handleCommand(byte header, const byte d[]) {
     sendFrame(header, seq, values);
   }
 
-  // HOLD HERE - leave manipulation mode: hold the hand-posed angle exactly.
+  // HOLD HERE - leave Manipulation mode: hold the hand-posed angle exactly.
   else if (header == HOLD_HERE_HEADER) {
     int dxlId = d[0];
     int percent = constrain(d[1], 0, 100);

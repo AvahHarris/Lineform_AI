@@ -5,9 +5,9 @@
 //    ANGLE  - the slider is the motor's TARGET angle:
 //             * dragging it moves that motor right away
 //             * a powered motor always goes back to / holds its bar angle
-//               (since 2026-11-18; pose by hand in manipulation mode, or
+//               (since 2026-11-18; pose by hand in Manipulation mode, or
 //               switch the row OFF - limp rows' bars follow the real angle).
-//               AI_FOLLOW_HAND_MOVES = true restores the old "hand push
+//               AUTOMATION_FOLLOW_HAND_MOVES = true restores the old "hand push
 //               becomes the new goal" behaviour.
 //             (A shape from the chat still waits for Create Shape - live
 //             reading pauses on a motor until its new angle has been sent.)
@@ -39,18 +39,18 @@ final int LIVE_SETTLE_MS = 800;         // after sending a motor an angle, wait 
 // local_config.json ("hand_move_threshold_deg", "hand_move_confirm_readings").
 float LIVE_FOLLOW_DEG = 2.0;            // hand movement smaller than this is ignored (was 5 for the soft arm; stiff motors barely sag)
 int LIVE_FOLLOW_CONFIRM = 1;            // ...and it must show in this many readings in a row (raise if motors twitch)
-// HAND MOVES IN AI MODE. true (default again since 2026-11-18, with lenient
+// HAND MOVES IN AUTOMATION MODE. true (default again since 2026-11-18, with lenient
 // thresholds for the stiffer arm: local_config.json "hand_move_threshold_deg"
 // 2, "hand_move_confirm_readings" 1): a hand push becomes the motor's new goal
 // once it is let go. false ("follow_hand_moves": false) = BARS ARE THE TARGETS:
 // a powered motor ALWAYS goes back to / holds the angle on its bar - pushing it
 // by hand never changes its goal, and gravity sag never becomes a new goal.
 // The bar shows the target; the 3D view still draws the REAL live angles.
-// (Pose by hand in MANIPULATION mode, or switch a row OFF / to 0% - limp rows'
+// (Pose by hand in Manipulation mode, or switch a row OFF / to 0% - limp rows'
 // bars follow the real angle.) true = the old soft-motor behaviour: a hand
 // push past LIVE_FOLLOW_DEG becomes the new goal ("follow_hand_moves" in
 // local_config.json).
-boolean AI_FOLLOW_HAND_MOVES = true;
+boolean AUTOMATION_FOLLOW_HAND_MOVES = true;
 boolean motorsBarsSynced = false; // first live reading adopted as the targets (see motorsTick)
 final int LIVE_DRAG_SEND_MS = 50;       // fastest rate a dragged slider is sent
 final int TORQUE_SEND_MS = 80;          // fastest rate a torque slider is sent
@@ -407,7 +407,7 @@ void motorsTick() {
     thread("motorsRunDiagnostics");
   }
 
-  // Overload protection: any motor at >= 95% torque -> manipulation mode (Modes.pde).
+  // Overload protection: any motor at >= 95% torque -> Manipulation mode (Modes.pde).
   modesCheckOverload();
 
   // Manipulation mode: motors limp, bars just follow the real angles (Modes.pde).
@@ -470,7 +470,7 @@ void motorsTick() {
   motorActualMs = now;
   if (aiAnimating) return;
 
-  if (!AI_FOLLOW_HAND_MOVES) {
+  if (!AUTOMATION_FOLLOW_HAND_MOVES) {
     // First reading after startup: the arm is wherever it was left, the bars
     // say 90. Take the real pose as every bar's target ONCE (and send it, so
     // the motors' goals and the bars agree) - nothing jumps on startup.
@@ -563,7 +563,7 @@ void motorsLiveReaderLoop() {
   while (true) {
     delay(manipulationMode ? MANIP_READ_INTERVAL_MS : LIVE_READ_INTERVAL_MS);
     if (!serialConnected()) continue;
-    // Torque use is read EVERY cycle in AI mode - whatever bar each row shows,
+    // Torque use is read EVERY cycle in Automation mode - whatever bar each row shows,
     // and also during animations and slider drags - because the overload
     // protection (Modes.pde, modesCheckOverload) needs it. In manipulation
     // mode the motors are limp, so there is nothing to protect.
@@ -661,46 +661,70 @@ synchronized float[] readAllMotorValues(int header, float scale, int timeoutMs) 
 // use, 0-100% of its Current Limit across the bar, and "now NN%" at the
 // right end. Since 2026-11-18 drawn on EVERY row's bar - ANGLE, TORQUE and
 // STIFF view alike - not only on TORQUE bars. (Loads are read every cycle in
-// AI mode; in manipulation mode the motors are limp, so nothing is drawn.)
+// Automation mode; in Manipulation mode the motors are limp, so nothing is drawn.)
 // Drawn after cp5.draw() so it sits on top.
 void motorsDrawLoadOverlay() {
   float[] loads = motorLoadPct;
-  if (loads == null || manipulationMode) return;
+  boolean live = loads != null && !manipulationMode && serialConnected();
   pushStyle();
-  textFont(hudFont);
-  hudTextSize(12);
-  textAlign(RIGHT, CENTER);
   for (int i = 0; i < MOTOR_COUNT; i++) {
     if (!rowActive(i + 2)) continue;
     float y = ROW_START_Y + i * ROW_STEP;
-    float pct = constrain(loads[i], 0, 100);
-    float lx = SLIDER_X + SLIDER_W * pct / 100.0;
-    stroke(0, 140);                       // dark edge so the line reads on any bar fill
-    strokeWeight(max(4, 4 * uiScale));
-    line(uiX(lx), uiY(y), uiX(lx), uiY(y + SLIDER_H));
-    stroke(255);
-    strokeWeight(max(2, 2 * uiScale));
-    line(uiX(lx), uiY(y), uiX(lx), uiY(y + SLIDER_H));
-    noStroke();
-    String nowText = "now " + round(loads[i]) + "%";
-    fill(0, 120);
-    hudText(nowText, SLIDER_X + SLIDER_W - 3, y + SLIDER_H / 2.0 + 1);
-    fill(255);
-    hudText(nowText, SLIDER_X + SLIDER_W - 4, y + SLIDER_H / 2.0);
-    if (!motorShowsTorque(i)) continue;  // the read-back line below is for TORQUE bars only
+
+    // ---- the white marker ON the bar ----
+    if (live) {
+      float pct = constrain(loads[i], 0, 100);
+      float lx = SLIDER_X + SLIDER_W * pct / 100.0;
+      // Thick white marker (2026-11-19: was 2 px) with a dark outline, sticking
+      // out a little above and below the bar, plus small caps top and bottom.
+      float over = 2; // + 3 px caps: stays clear of the next row (rows are 12 px apart)
+      strokeCap(SQUARE);
+      stroke(0, 190);
+      strokeWeight(max(7, 7 * uiScale));
+      line(uiX(lx), uiY(y - over), uiX(lx), uiY(y + SLIDER_H + over));
+      stroke(255);
+      strokeWeight(max(4, 4 * uiScale));
+      line(uiX(lx), uiY(y - over), uiX(lx), uiY(y + SLIDER_H + over));
+      noStroke();
+      fill(255);
+      float cw = 4;
+      triangle(uiX(lx - cw), uiY(y - over - 3), uiX(lx + cw), uiY(y - over - 3), uiX(lx), uiY(y - over + 1));
+      triangle(uiX(lx - cw), uiY(y + SLIDER_H + over + 3), uiX(lx + cw), uiY(y + SLIDER_H + over + 3), uiX(lx), uiY(y + SLIDER_H + over - 1));
+    }
+
+    // ---- ALWAYS: small load text UNDER the bar (2026-11-19; replaces the
+    // "now NN%" that used to sit on the bar's right end) ----
+    String t;
+    color tc = THEME_TEXT;
+    if (manipulationMode) { t = "load: -  (torque OFF)"; tc = THEME_MUTED; }
+    else if (!serialConnected()) { t = "load: -  (offline)"; tc = THEME_MUTED; }
+    else if (loads == null) { t = "load: -"; tc = THEME_MUTED; }
+    else {
+      float v = loads[i];
+      boolean limp = !motorPowerOn(i) || motorTorquePct[i] == 0;
+      t = "load " + round(v) + "% of full torque" + (limp ? "  (OFF)" : "");
+      if (limp) tc = THEME_MUTED;
+      else if (OVERLOAD_TRIP_PCT > 0 && v >= OVERLOAD_TRIP_PCT) tc = THEME_RED;
+      else if (v >= 75) tc = THEME_YELLOW;
+    }
+    textFont(uiBoldFont(max(7, round(10 * uiScale))));
+    textAlign(LEFT, TOP);
+    fill(tc);
+    hudText(t, SLIDER_X + 2, y + SLIDER_H + 1);
+    float textEnd = SLIDER_X + 2 + textWidth(t) / uiScale;
+
+    if (!motorShowsTorque(i)) continue;  // the read-back text below is for TORQUE bars only
     // What the MOTOR reports it was set to (read back ~1 s after a change),
-    // under the bar - so you can see whether the setting really arrived.
+    // after the load text - so you can see whether the setting really arrived.
     if (motorDiagTorqueOn != null && motorDiagPwmPct != null) {
-      textAlign(LEFT, TOP);
+      textFont(hudFont);
+      hudTextSize(10);
       fill(THEME_ORANGE);
-      String rb = (!motorDiagTorqueOn[i] ? "motor: OFF" : ("motor: " + round(motorDiagPwmPct[i]) + "%"))
+      String rb = "  | " + (!motorDiagTorqueOn[i] ? "motor: OFF" : ("motor: " + round(motorDiagPwmPct[i]) + "%"))
         + "  | " + motorsDiagLastText(i)
         + (motorDiagCounts == null ? "" : "  | fw up " + round(motorDiagCounts[0]) + "s, got 251 x" + round(motorDiagCounts[3])
            + " (GUI sent " + motorsTorqueSentCount + "), last: " + motorsLastTlText());
-      hudTextSize(10);
-      hudText(rb, SLIDER_X + 2, y + SLIDER_H + 1);
-      hudTextSize(12);
-      textAlign(RIGHT, CENTER);
+      hudText(rb, textEnd, y + SLIDER_H + 1);
     }
   }
   popStyle();
@@ -775,9 +799,9 @@ float motorCanvasAngle(int i) {
   // Otherwise the TRUE angle behind the bar, unclamped - so a joint pushed
   // past its 0/180 limit is drawn where it really is, not at the limit.
   if (motorSliderPending(i)) return cp5.get(Slider.class, "Motor " + (i + 2)).getValue();
-  // Bars = targets (AI_FOLLOW_HAND_MOVES false): the bar shows the goal, the
+  // Bars = targets (AUTOMATION_FOLLOW_HAND_MOVES false): the bar shows the goal, the
   // 3D view the REAL arm from the latest live reading (if it is fresh).
-  if (!manipulationMode && !AI_FOLLOW_HAND_MOVES && !aiAnimating && rowActive(i + 2)
+  if (!manipulationMode && !AUTOMATION_FOLLOW_HAND_MOVES && !aiAnimating && rowActive(i + 2)
       && serialConnected() && motorActualMs > 0 && millis() - motorActualMs < 1000) return motorActualDeg[i];
   return motorShownDeg[i];
 }
@@ -855,7 +879,7 @@ void motorsApplyPower(int i, boolean on) {
     // Goes to the angle on its bar (which, while the row was limp, followed
     // the real angle - so it holds where it is unless you dragged the bar).
     float here = cp5.getController("Motor " + rowId).getValue();
-    if (AI_FOLLOW_HAND_MOVES) { // old behaviour: hold exactly where it is now
+    if (AUTOMATION_FOLLOW_HAND_MOVES) { // old behaviour: hold exactly where it is now
       if (serialConnected() && millis() - motorActualMs < 600) here = motorActualDeg[i];
       else if (serialConnected()) here = readMotorPosition(rowId, here);
     }

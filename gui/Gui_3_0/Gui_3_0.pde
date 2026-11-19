@@ -99,14 +99,15 @@ void loadLocalConfig() {
     if (c.hasKey("hand_move_confirm_readings")) LIVE_FOLLOW_CONFIRM = max(1, c.getInt("hand_move_confirm_readings"));
     if (c.hasKey("overload_trip_pct")) OVERLOAD_TRIP_PCT = max(0, c.getFloat("overload_trip_pct")); // 0 = off
     if (c.hasKey("twitch_guard")) TWITCH_GUARD_ON = c.getBoolean("twitch_guard");
-    if (c.hasKey("follow_hand_moves")) AI_FOLLOW_HAND_MOVES = c.getBoolean("follow_hand_moves");
+    if (c.hasKey("follow_hand_moves")) AUTOMATION_FOLLOW_HAND_MOVES = c.getBoolean("follow_hand_moves");
+    if (c.hasKey("load_colors_3d")) LOAD_COLORS_3D = c.getBoolean("load_colors_3d");
     if (c.hasKey("overload_confirm_readings")) OVERLOAD_CONFIRM_READINGS = max(1, c.getInt("overload_confirm_readings"));
     println("local_config.json: " + ACTIVE_MOTORS + " active motors, base block "
       + (BASE_BLOCK_FIRST ? "before motor 1" : "after the last motor")
       + ", hand move > " + LIVE_FOLLOW_DEG + " deg for " + LIVE_FOLLOW_CONFIRM + " reading(s)"
       + ", overload trip " + (OVERLOAD_TRIP_PCT > 0 ? OVERLOAD_TRIP_PCT + "%" : "OFF")
       + ", twitch guard " + (TWITCH_GUARD_ON ? "ON" : "OFF")
-      + ", AI mode " + (AI_FOLLOW_HAND_MOVES ? "follows hand moves" : "holds the bar angles"));
+      + ", Automation mode " + (AUTOMATION_FOLLOW_HAND_MOVES ? "follows hand moves" : "holds the bar angles"));
   } catch (Exception e) {
     println("Couldn't read local_config.json (" + e.getMessage() + ") - using defaults.");
   }
@@ -179,14 +180,14 @@ final int MOTOR_COUNT = 11;
 // ---- Motor row layout - shared by setup() (builds the controls) and
 // draw() (positions the ON/OFF labels) so they can't drift out of sync. ----
 final int SLIDER_X = 20;
-final int SLIDER_W = 170;
+final int SLIDER_W = 210;   // was 170 (2026-11-19: longer bars)
 final int SLIDER_H = 24;
-final int TOGGLE_X = 280;
+final int TOGGLE_X = 320;   // moved right with the longer bars (was 280)
 final int TOGGLE_W = 60;
 final int TOGGLE_H = 22;
 // Torque ON/OFF switch per row (as in the backup GUI), right of the
 // ANGLE/TORQUE switch's label.
-final int POWER_X = 420;
+final int POWER_X = 460;    // (was 420)
 final int POWER_W = 44;
 final int ROW_STEP = 36;
 final int ROW_START_Y = 20;
@@ -987,7 +988,7 @@ void draw() {
   // Don't let dragging inside the GUI panel (sliders, buttons, prompt box)
   // also orbit the camera - PeasyCam only knows about raw mouse events, not
   // that ControlP5 controls are logically "on top" of the 3D scene.
-  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver());
+  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver() && !loadSwitchMouseOver());
 
   motorsSyncStiffnessSliders(); // stiffness bars follow levels changed elsewhere (Motors.pde)
 
@@ -1044,9 +1045,10 @@ void draw() {
     hudText(on ? "ON" : "OFF", POWER_X + POWER_W + 8, labelY);
   }
 
+  drawLoadLegend();         // LOAD COLORS switch + color key for the 3D blocks (drawlineform3d.pde)
   drawChatPanel();
-  drawManipulationHint();  // where Create Shape / Reset sit, in manipulation mode
-  drawModeSwitchPanel();   // AI / manipulation switch backing + labels (+ banner)
+  drawManipulationHint();  // where Create Shape / Reset sit, in Manipulation mode
+  drawModeSwitchPanel();   // Automation / Manipulation switch backing + labels (+ banner)
 
   // ControlP5 controls are already positioned in physical pixel coordinates.
   cp5.draw();
@@ -1065,8 +1067,9 @@ void draw() {
 
 // Clicks on the hand-drawn controls (ControlP5 handles its own).
 void mousePressed() {
-  if (modesMousePressed()) return;      // AI / manipulation switch (Modes.pde)
-  if (noticeMousePressed()) return;     // click the warnings panel = clear it (Notices.pde)
+  if (modesMousePressed()) return;      // Automation / Manipulation switch (Modes.pde)
+  if (noticeMousePressed()) return;
+  if (loadSwitchMousePressed()) return; // LOAD COLORS on/off (drawlineform3d.pde)     // click the warnings panel = clear it (Notices.pde)
   if (motorsViewMousePressed()) return; // per-row ANGLE | TORQUE | STIFF selector (Motors.pde)
 }
 
@@ -1373,7 +1376,46 @@ if (name.equals("Reset")) {
 //  prefix so it can't collide with those, whatever they turn out to do.
 // =====================================================================
 
+// Real arm geometry for the agents (2026-11-19), built from the same
+// constants as the 3D view / solver ("3D chain geometry" above), so it stays
+// in sync. Prepended to AI_SYSTEM_PROMPT (used by the Designer and, through
+// AI_ANIMATION_SYSTEM_PROMPT, the Motion agent).
+final float ARM_PITCH_MM = MOTOR_LENGTH_MM + MOTOR_GAP_MM;       // joint to joint
+// Whole arm: 12 motor bodies (unpowered motor 1 + the 11 driven ones) and 11 gaps.
+final float ARM_CHAIN_MM = (MOTOR_COUNT + 1) * MOTOR_LENGTH_MM + MOTOR_COUNT * MOTOR_GAP_MM;
+String AI_ARM_GEOMETRY_NOTE =
+  "=== THE PHYSICAL ARM (real dimensions) ===\n"
+  + "The arm is a single open chain of " + (MOTOR_COUNT + 1) + " Dynamixel XL330 servo motors "
+  + "(labelled 1 to " + (MOTOR_COUNT + 1) + "), joined end to end. Each motor is a rigid block "
+  + round(MOTOR_LENGTH_MM) + " mm long with a " + round(MOTOR_THICK_MM) + " x "
+  + round(MOTOR_THIN_MM) + " mm cross-section, with a " + round(MOTOR_GAP_MM) + " mm gap "
+  + "(bracket) between neighbours. So the joints (motor shafts) are " + round(ARM_PITCH_MM)
+  + " mm apart and the whole arm is about " + round(ARM_CHAIN_MM / 10.0) + " cm long.\n"
+  + "- NOTHING IS MOUNTED: both ends of the arm are free. Motor 1 is at one end and is NOT "
+  + "powered or used as a joint, but it is NOT fixed either - it is an ordinary rigid link "
+  + "that motor 2's joint swings, exactly like every other link. Motor " + (MOTOR_COUNT + 1)
+  + " is at the other free end.\n"
+  + "- The " + MOTOR_COUNT + " JOINTS you control are motors 2 to " + (MOTOR_COUNT + 1)
+  + ": joint 1 = motor 2 (the bend between motor 1 and motor 2), joint 2 = motor 3, ..., joint "
+  + MOTOR_COUNT + " = motor " + (MOTOR_COUNT + 1) + ". \"Base\" in this guidance means the "
+  + "motor-1 end and \"tip\" the motor-" + (MOTOR_COUNT + 1) + " end: shapes and joint lists "
+  + "run from base to tip, and the 3D view draws the motor-1 end in place as its reference. "
+  + "That is only a frame of reference - physically neither end is held.\n"
+  + "- Consecutive joints bend about axes turned 90 degrees to each other: odd joints "
+  + "(1, 3, 5, ...) bend in one plane, even joints (2, 4, 6, ...) in the perpendicular plane. "
+  + "A flat shape therefore bends mainly with every other joint.\n"
+  + "- Each joint bends at most " + round(AI_MAX_TURN_DEG) + " degrees either way from straight "
+  + "in your shapes. A right-angle corner is one joint at 90; a full 360-degree turn in one "
+  + "plane needs at least 4 bending joints (about 8 links).\n"
+  + "- Your segment lengths are RELATIVE units (the whole shape is rescaled to the chain's "
+  + "length), but think in real sizes: one link is about 1/" + MOTOR_COUNT + " of the shape (~"
+  + round(ARM_PITCH_MM / 10.0) + " cm). The smallest feature the arm can make is one link; a "
+  + "clearly visible curve needs 2-3 links (~" + round(2 * ARM_PITCH_MM / 10.0) + "-"
+  + round(3 * ARM_PITCH_MM / 10.0) + " cm). A closed circle using the whole arm is about "
+  + round(ARM_CHAIN_MM / PI / 10.0) + " cm across.\n\n";
+
 String AI_SYSTEM_PROMPT =
+  AI_ARM_GEOMETRY_NOTE + 
   "You describe a shape as a small number of geometric SEGMENTS, not raw "
   + "coordinates - each segment is one simple primitive (a straight line, a "
   + "constant-curvature arc, a closed loop, a spiral, or a freeform spline "
@@ -1613,15 +1655,15 @@ String AI_ANIMATION_SYSTEM_PROMPT = AI_SYSTEM_PROMPT + "\n\n"
   + "visible across all 11 joints at once, reading as a snake's body, not "
   + "a single gentle arc), period_ms ~900-1300 for an easy swim or "
   + "~500-700 for a fast/urgent one, and direction +1 so the wave appears "
-  + "to push from the fixed base toward the free tip (a snake driving "
+  + "to push from the base end toward the tip end (a snake driving "
   + "itself forward) - use -1 only if the motion should instead look like "
-  + "it's whipping FROM the free tip inward. Also give the last 4-5 joints "
+  + "it's whipping FROM the tip end inward. Also give the last 4-5 joints "
   + "a higher joint_stiffness (e.g. base joints 0,0,0,0,0,0 then tail "
   + "joints 1,2,2,3,3) so the tail trails loosely behind the traveling "
   + "wave instead of tracking it as precisely as the base does - a real "
   + "snake's tail has visible lag/whip, a uniformly-stiff arm doesn't. A "
   + "WHIP CRACK is similar but with direction -1 (the wave runs from the "
-  + "free tip back toward the base), a short wavelength_joints (~4-5), a "
+  + "tip end back toward the base end), a short wavelength_joints (~4-5), a "
   + "short period_ms (~300-500), and the tip joints left at FULL stiffness "
   + "(0) rather than soft - a whip's snap comes from the wave's speed and "
   + "tightness, not from looseness.\n\n"
@@ -2152,7 +2194,7 @@ ArrayList<Float> aiAnimPoseFits = new ArrayList<Float>();
 
 void aiStartAnimation(AIAnimationResult result) {
   if (manipulationMode) { // a reply that arrived after switching modes
-    noticeAdd("status", "Animation not started - switch back to AI mode first.");
+    noticeAdd("status", "Animation not started - switch back to Automation mode first.");
     return;
   }
   aiStopAnimation(); // never leave an old animation silently playing under a new one
@@ -2561,7 +2603,7 @@ String aiBuildRefinementFeedback(float fitQuality) {
 
   if (aiLastWorstJoint > 0) {
     sb.append(" The single worst-fitting point was around joint " + aiLastWorstJoint
-      + " of " + MOTOR_COUNT + " (counting from the fixed base, joint 1) - whichever "
+      + " of " + MOTOR_COUNT + " (counting from the base end, joint 1 = motor 2) - whichever "
       + "part of your path lands at roughly that fraction along its length is the "
       + "part most worth simplifying or re-proportioning.");
   }
@@ -2581,8 +2623,8 @@ String aiBuildRefinementFeedback(float fitQuality) {
     sb.append(" Here is where each joint was supposed to go versus where the real arm "
       + "actually reached, in the same coordinates as your segments ("
       + (aiAnchorAtCenter
-        ? "this fit centered your shape on the arm, so your start point is NOT pinned to the arm's fixed base"
-        : "your shape starts at its first segment's start point, which sits on the arm's fixed base")
+        ? "this fit centered your shape on the arm, so your start point is NOT pinned to the arm's base end (motor 1's end)"
+        : "your shape starts at its first segment's start point, which sits at the arm's base end (motor 1's end - a reference point, not a mount)")
       + "):\n"
       + aiLastJointReport
       + "Compare this with your intended shape: look for sides that came out shorter or "
@@ -3165,8 +3207,8 @@ JSONObject aiBuildAnimationToolDefinition() {
     + "a slow/graceful slither, 400-700 for a fast/urgent one.");
 
   JSONObject waveDirectionProp = aiNumberSchema(
-    "+1 for the wave traveling from joint 1 (the base, fixed end) toward "
-    + "joint 11 (the free tip) - a snake pushing itself forward tail-first "
+    "+1 for the wave traveling from joint 1 (the base end, next to motor 1) toward "
+    + "joint 11 (the tip end) - a snake pushing itself forward tail-first "
     + "- or -1 for the reverse (tip toward base, more like something "
     + "being whipped from the free end). Use exactly 1 or -1.");
 
@@ -3209,8 +3251,8 @@ JSONObject aiBuildAnimationToolDefinition() {
   jointStiffnessProp.setInt("maxItems", MOTOR_COUNT);
   jointStiffnessProp.setString("description",
     "OPTIONAL. Exactly 11 integers, one per joint in chain order (joint 1 "
-    + "= the base, closest to the fixed mount, through joint 11 = the free "
-    + "tip). Each is a stiffness LEVEL, not a raw gain: 0 = full/default "
+    + "= the base end, the bend between motor 1 and motor 2, through joint 11 = the "
+    + "tip end). Each is a stiffness LEVEL, not a raw gain: 0 = full/default "
     + "stiffness (precise, holds its angle firmly), up to " + (NUM_STIFFNESS_LEVELS - 1)
     + " = softest (loose, more passive give/wobble under its own momentum "
     + "or gravity). Applies for this animation's ENTIRE run, not pose to "
