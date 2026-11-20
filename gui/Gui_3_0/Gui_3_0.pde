@@ -101,6 +101,9 @@ void loadLocalConfig() {
     if (c.hasKey("twitch_guard")) TWITCH_GUARD_ON = c.getBoolean("twitch_guard");
     if (c.hasKey("follow_hand_moves")) AUTOMATION_FOLLOW_HAND_MOVES = c.getBoolean("follow_hand_moves");
     if (c.hasKey("load_colors_3d")) LOAD_COLORS_3D = c.getBoolean("load_colors_3d");
+    if (c.hasKey("agent_temperature")) AGENT_TEMPERATURE = min(1, c.getFloat("agent_temperature"));
+    if (c.hasKey("settings_critic")) SETTINGS_CRITIC_ON = c.getBoolean("settings_critic");
+    if (c.hasKey("load_color_gain")) LOAD_COLOR_GAIN = constrain(c.getFloat("load_color_gain"), 1, LOAD_GAIN_MAX);
     if (c.hasKey("overload_confirm_readings")) OVERLOAD_CONFIRM_READINGS = max(1, c.getInt("overload_confirm_readings"));
     println("local_config.json: " + ACTIVE_MOTORS + " active motors, base block "
       + (BASE_BLOCK_FIRST ? "before motor 1" : "after the last motor")
@@ -257,6 +260,16 @@ boolean aiIsMirroredMotor(int dxlId) {
 // ---- AI shape generator (calls Claude directly, no separate server) ----
 String ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 String ANTHROPIC_MODEL   = "claude-opus-5"; // more capable spatial reasoning than Sonnet, costs more per call
+// Sampling temperature for EVERY agent call (Designer, Motion, both Critics,
+// legacy prompt box). OFF (-1) by default: the current model (claude-opus-5)
+// rejects it ("temperature is deprecated for this model"). For a model that
+// accepts it, set "agent_temperature" in local_config.json (e.g. 0.8 = a bit
+// steadier than the default 1.0). If the API ever rejects it, aiCallAnthropic()
+// drops it for the rest of the session and resends the request without it.
+float AGENT_TEMPERATURE = -1;
+void agentsApplyTemperature(JSONObject body) {
+  if (AGENT_TEMPERATURE >= 0 && !body.hasKey("temperature")) body.setFloat("temperature", AGENT_TEMPERATURE);
+}
 String ANTHROPIC_API_KEY; // loaded in setup() - see loadApiKey()
 
 // ---- JOINT RANGE (2026-11-16) ----
@@ -988,7 +1001,7 @@ void draw() {
   // Don't let dragging inside the GUI panel (sliders, buttons, prompt box)
   // also orbit the camera - PeasyCam only knows about raw mouse events, not
   // that ControlP5 controls are logically "on top" of the 3D scene.
-  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver() && !loadSwitchMouseOver());
+  cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver() && !loadPanelMouseOver());
 
   motorsSyncStiffnessSliders(); // stiffness bars follow levels changed elsewhere (Motors.pde)
 
@@ -1066,6 +1079,10 @@ void draw() {
 }
 
 // Clicks on the hand-drawn controls (ControlP5 handles its own).
+// The load-color GAIN slider is drawn by hand (drawlineform3d.pde).
+void mouseDragged() { loadGainMouseDragged(); }
+void mouseReleased() { loadGainMouseReleased(); }
+
 void mousePressed() {
   if (modesMousePressed()) return;      // Automation / Manipulation switch (Modes.pde)
   if (noticeMousePressed()) return;
@@ -2652,6 +2669,7 @@ JSONObject aiBuildRefinementRequestBody(String originalPrompt, ArrayList<JSONObj
   JSONObject body = new JSONObject();
   body.setString("model", ANTHROPIC_MODEL);
   body.setInt("max_tokens", 4096);
+  agentsApplyTemperature(body);
   body.setJSONArray("system", aiBuildCachedSystemBlocks());
 
   JSONArray tools = new JSONArray();
@@ -3315,6 +3333,7 @@ JSONObject aiBuildRequestBody(String prompt) {
   JSONObject body = new JSONObject();
   body.setString("model", ANTHROPIC_MODEL);
   body.setInt("max_tokens", 4096);
+  agentsApplyTemperature(body);
   body.setJSONArray("system", aiBuildCachedSystemBlocks());
 
   JSONArray tools = new JSONArray();
@@ -3370,6 +3389,7 @@ JSONObject aiBuildAnimationRequestBody(String prompt) {
   JSONObject body = new JSONObject();
   body.setString("model", ANTHROPIC_MODEL);
   body.setInt("max_tokens", 4096);
+  agentsApplyTemperature(body);
 
   JSONObject systemBlock = new JSONObject();
   systemBlock.setString("type", "text");
@@ -3413,7 +3433,20 @@ String aiCallAnthropic(String jsonBody) throws IOException {
   String line;
   while ((line = reader.readLine()) != null) sb.append(line);
   reader.close();
-  return sb.toString();
+  String reply = sb.toString();
+  // Some models reject the temperature parameter ("temperature is deprecated
+  // for this model"). Then: stop sending it for the rest of the session and
+  // send this request again without it, so the call still succeeds.
+  if (code == 400 && reply.toLowerCase().contains("temperature") && jsonBody.contains("\"temperature\"")) {
+    AGENT_TEMPERATURE = -1;
+    println("This model doesn't accept a temperature - sending requests without it from now on.");
+    JSONObject b = JSONObject.parse(jsonBody);
+    if (b != null && b.hasKey("temperature")) {
+      b.remove("temperature");
+      return aiCallAnthropic(b.toString());
+    }
+  }
+  return reply;
 }
 
 // Fit a Catmull-Rom spline through the AI's control points, resample it by

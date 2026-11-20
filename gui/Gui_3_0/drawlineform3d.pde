@@ -245,6 +245,13 @@ void drawLinkBridge(int j) {
 //  in local_config.json, the blocks keep their normal colors.
 // =====================================================================
 boolean LOAD_COLORS_3D = true; // switched at runtime by the LOAD COLORS switch (top-right of the 3D view)
+// Color multiplier: the block color shows load x this, so small loads can be
+// pushed toward red. Set with the GAIN slider under the LOAD COLORS switch;
+// "load_color_gain" in local_config.json sets the start value (1 = true scale).
+// Only the 3D colors use it - the white line and the text under the bars
+// always show the real load.
+float LOAD_COLOR_GAIN = 1;
+final float LOAD_GAIN_MAX = 20;           // slider range 1x .. 20x (logarithmic)
 final float LOAD_COLOR_SMOOTHING = 0.25;  // per frame, 0..1 - higher = follows faster, lower = less flicker
 float[] blockLoadSmoothed = new float[MOTOR_COUNT];
 int blockLoadFrame = -1;
@@ -259,7 +266,8 @@ float blockLoadShown(int i) {
     blockLoadFrame = frameCount;
     float[] loads = motorLoadPct;
     for (int k = 0; k < MOTOR_COUNT; k++) {
-      float target = (loads == null) ? 0 : constrain(loads[k], 0, 100);
+      // x LOAD_COLOR_GAIN (the multiplier slider): with gain 10, a 10% load is already red.
+      float target = (loads == null) ? 0 : constrain(loads[k] * LOAD_COLOR_GAIN, 0, 100);
       blockLoadSmoothed[k] = lerp(blockLoadSmoothed[k], target, LOAD_COLOR_SMOOTHING);
     }
   }
@@ -301,8 +309,14 @@ boolean loadSwitchMouseOver() {
       && mouseY >= uiY(LOADSW_Y) && mouseY <= uiY(LOADSW_Y + LOADSW_H);
 }
 
-// Called from mousePressed(). Returns true if the switch was clicked.
+// Switch OR multiplier slider under the mouse (keeps the camera from orbiting).
+boolean loadPanelMouseOver() {
+  return loadSwitchMouseOver() || loadGainMouseOver() || loadGainDragging;
+}
+
+// Called from mousePressed(). Returns true if the switch or slider was clicked.
 boolean loadSwitchMousePressed() {
+  if (loadGainMouseOver()) { loadGainDragging = true; loadGainSetFromMouse(); return true; }
   if (!loadSwitchMouseOver()) return false;
   LOAD_COLORS_3D = !LOAD_COLORS_3D;
   println("3D load colors " + (LOAD_COLORS_3D ? "ON" : "OFF"));
@@ -331,9 +345,12 @@ void drawLoadLegend() {
   textAlign(CENTER, CENTER);
   hudText(on ? "ON" : "OFF", px + pw / 2.0, py + ph / 2.0);
 
-  // the color key, under the switch, while the heat-map is really showing
+  // the multiplier slider, under the switch, while the heat-map is switched on
+  if (on) drawLoadGainSlider();
+
+  // the color key, under the slider, while the heat-map is really showing
   if (loadColorsActive()) {
-    float ky = y + h + 4, kh = 34;
+    float ky = LOADGAIN_Y + LOADGAIN_H + 4, kh = 34;
     themePanel(x, ky, w, kh);
     float bx = x + pad, by = ky + 7, bw = w - 2 * pad, bh = 9;
     int steps = 40;
@@ -344,12 +361,73 @@ void drawLoadLegend() {
     textFont(hudFont);
     hudTextSize(10);
     fill(THEME_MUTED);
+    // labels in REAL load: with gain g, red = 100/g % of full torque
     textAlign(LEFT, TOP);
     hudText("0%", bx, by + bh + 1);
     textAlign(CENTER, TOP);
-    hudText("50% of full torque", bx + bw / 2, by + bh + 1);
+    hudText(loadPctText(50 / LOAD_COLOR_GAIN) + " of full torque", bx + bw / 2, by + bh + 1);
     textAlign(RIGHT, TOP);
-    hudText("100%", bx + bw, by + bh + 1);
+    hudText(loadPctText(100 / LOAD_COLOR_GAIN), bx + bw, by + bh + 1);
   }
   popStyle();
+}
+
+// ---- GAIN slider (under the LOAD COLORS switch) ----
+final float LOADGAIN_Y = LOADSW_Y + LOADSW_H + 4, LOADGAIN_H = 30;
+final float LOADGAIN_TRACK_X0 = LOADSW_X + 46, LOADGAIN_TRACK_X1 = LOADSW_X + LOADSW_W - 50;
+boolean loadGainDragging = false;
+
+boolean loadGainMouseOver() {
+  return loadSwitchVisible() && LOAD_COLORS_3D
+      && mouseX >= uiX(LOADSW_X) && mouseX <= uiX(LOADSW_X + LOADSW_W)
+      && mouseY >= uiY(LOADGAIN_Y) && mouseY <= uiY(LOADGAIN_Y + LOADGAIN_H);
+}
+
+// Slider position 0..1 <-> gain 1..LOAD_GAIN_MAX, logarithmic (fine control near 1x).
+float loadGainToPos(float g) { return log(constrain(g, 1, LOAD_GAIN_MAX)) / log(LOAD_GAIN_MAX); }
+float loadPosToGain(float t) { return exp(constrain(t, 0, 1) * log(LOAD_GAIN_MAX)); }
+
+void loadGainSetFromMouse() {
+  float lx = (mouseX - uiOffsetX) / uiScale;
+  float t = (lx - LOADGAIN_TRACK_X0) / (LOADGAIN_TRACK_X1 - LOADGAIN_TRACK_X0);
+  float g = loadPosToGain(t);
+  LOAD_COLOR_GAIN = g < 1.05 ? 1 : (g < 10 ? round(g * 10) / 10.0 : round(g)); // snap to 1x, tidy steps
+}
+
+void loadGainMouseDragged() { if (loadGainDragging) loadGainSetFromMouse(); }
+void loadGainMouseReleased() {
+  if (loadGainDragging) println("3D load color gain: x" + loadGainText());
+  loadGainDragging = false;
+}
+
+String loadGainText() { return LOAD_COLOR_GAIN < 10 ? nf(LOAD_COLOR_GAIN, 1, 1) : str(round(LOAD_COLOR_GAIN)); }
+String loadPctText(float pct) { return (pct < 10 ? nf(pct, 1, 1) : str(round(pct))) + "%"; }
+
+void drawLoadGainSlider() {
+  float x = LOADSW_X, y = LOADGAIN_Y, w = LOADSW_W, h = LOADGAIN_H, pad = 8;
+  themePanel(x, y, w, h);
+  float cy = y + h / 2.0;
+  textFont(uiBoldFont(max(7, round(10 * uiScale))));
+  textAlign(LEFT, CENTER);
+  fill(THEME_TEXT);
+  hudText("GAIN", x + pad, cy);
+  // track, filled with the color scale up to the knob
+  float x0 = LOADGAIN_TRACK_X0, x1 = LOADGAIN_TRACK_X1, th = 6;
+  float t = loadGainToPos(LOAD_COLOR_GAIN), kx = x0 + (x1 - x0) * t;
+  noStroke();
+  fill(THEME_CTRL_BG);
+  rect(uiX(x0), uiY(cy - th / 2), (x1 - x0) * uiScale, th * uiScale, th / 2 * uiScale);
+  fill(loadColor(100 * t));
+  rect(uiX(x0), uiY(cy - th / 2), (kx - x0) * uiScale, th * uiScale, th / 2 * uiScale);
+  // knob
+  boolean hot = loadGainDragging || loadGainMouseOver();
+  fill(255);
+  stroke(0, 150);
+  strokeWeight(1);
+  ellipse(uiX(kx), uiY(cy), (hot ? 14 : 12) * uiScale, (hot ? 14 : 12) * uiScale);
+  noStroke();
+  // value
+  textAlign(RIGHT, CENTER);
+  fill(LOAD_COLOR_GAIN > 1 ? THEME_YELLOW : THEME_TEXT);
+  hudText("x" + loadGainText(), x + w - pad, cy);
 }

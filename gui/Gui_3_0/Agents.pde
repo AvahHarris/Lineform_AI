@@ -65,18 +65,33 @@ String AGENT_JOINT_SETTINGS_GUIDE =
   "- JOINT SETTINGS. Every joint has three settings you can change; ALL of them are your "
   + "tools, not just the angles:\n"
   + "  * ANGLE - where the joint goes (from your segments / poses / wave).\n"
-  + "  * TORQUE (joint_torque, 0-100 %) - HOW HARD it may push: a cap on the motor's "
-  + "force. 100 = full strength; lower = weaker, slower, gives way under load and may sag "
-  + "under the weight of the links it has to move; 0 = "
-  + "LIMP, a free hinge that holds no angle at all.\n"
-  + "  * STIFFNESS (joint_stiffness, level 0-3) - how firmly it pulls back to its angle "
-  + "when it is off it (its position gain). 0 = full: precise, springs straight back; 1 = "
-  + "medium; 2 = soft; 3 = very soft: springy and compliant, lags and wobbles behind fast "
-  + "motion, settles a little short under load. Softer levels also turn off the motor's "
-  + "gravity correction, so a soft joint carrying weight droops a bit.\n"
-  + "  * They combine: torque limits the FORCE, stiffness sets the SPRINGINESS. Firm and "
-  + "exact = torque 100 + level 0. Loose but still moving = full or medium torque + level "
-  + "2-3. Weak / gentle = low torque. Free-swinging = torque 0.\n"
+  + "  * HOW A POWERED JOINT BEHAVES: whenever its torque is above 0, the motor is ON and "
+  + "actively FIGHTS BACK against anything that moves it off its angle - a push, gravity, "
+  + "the swing of the links around it. Pushed off, it pushes back toward its angle and "
+  + "returns there when let go. TORQUE and STIFFNESS only shape HOW it fights back; "
+  + "neither one switches the fight-back off (only torque 0 does).\n"
+  + "  * TORQUE (joint_torque, 0-100 %) - the MAXIMUM fight-back force: a cap on the "
+  + "motor's force. 100 = full strength. Lower = it gives in sooner under load (sags under "
+  + "the links it moves, slower), BUT it still pushes back up to that cap and still "
+  + "returns to its angle - even 5-20% torque is a weak SPRING, not a free hinge.\n"
+  + "  * STIFFNESS (joint_stiffness, level 0-3) - how STEEPLY the fight-back rises as the "
+  + "joint is pushed off its angle (the motor's position gain): the spring constant. 0 = "
+  + "full: precise, snaps straight back; 1 = medium; 2 = soft; 3 = very soft: springy, "
+  + "lags and wobbles behind fast motion, settles a little short under load. Softer levels "
+  + "also turn off the motor's gravity correction, so a soft joint carrying weight droops "
+  + "a bit. EVEN THE SOFTEST LEVEL (3) KEEPS THE MOTOR ON: the joint is still a spring "
+  + "that pulls back to its angle, it never hangs or swings freely.\n"
+  + "  * TORQUE 0 IS THE ONLY WAY TO GET A FREE HINGE. At torque 0 the motor is switched "
+  + "OFF: no fight-back at all, the joint holds no angle and simply flops, hangs and "
+  + "swings with gravity and the motion around it (its angle in your shape is then only a "
+  + "starting guess). Any joint that should be a loose CHAIN, rope link, flail or pivot "
+  + "that swings freely MUST be torque 0 - low torque or very soft stiffness would make it "
+  + "a spring that snaps back, which is wrong for such parts. Example: a NUNCHUCK is two "
+  + "rigid sticks (torque 100, stiffness 0) joined by a chain whose joints are ALL torque 0 "
+  + "(stiffness then doesn't matter).\n"
+  + "  * Choosing: rigid / exact = torque 100 + level 0. Springy, flexible but returns to "
+  + "its shape (a tail, antenna, stem, cable) = full or medium torque + level 2-3. Weak / "
+  + "gentle but still holding = low torque. Free-swinging, no spring-back at all = torque 0.\n"
   + "  * This arm has STIFF motors (XL330-M288-class): at torque 100 + level 0 a joint "
   + "holds its angle firmly with little sag, even under the weight of the links it moves, "
   + "so full settings are the right default for rigid objects. Softening is a deliberate "
@@ -115,8 +130,9 @@ String DESIGNER_SYSTEM_TAIL =
   + "each joint HOLDS them, and stay in effect until changed (the user's bars, you, the "
   + "Motion agent, or Reset). Use them when the object has parts that should be soft or "
   + "loose: e.g. a NUNCHUCK is two rigid sticks (torque 100, stiffness 0) joined by a "
-  + "loose chain (the joints in between at torque 0 = limp, free-swinging); a rope, tail "
-  + "or flag end can be lower torque and/or softer (level 2-3) so it gives when touched; a "
+  + "loose chain (EVERY joint in between at torque 0 = motor off, free-swinging - not low "
+  + "torque, not soft stiffness, both of which still spring back); a springy tail, antenna "
+  + "or flag end that should give but come back can be softer (level 2-3); a "
   + "tool, frame or polygon stays at 100 / level 0 so its corners hold exactly. When the "
   + "user asks to make the shape (or part of it) firmer, softer, stronger, weaker, looser, "
   + "floppier, more rigid, etc., change joint_torque / joint_stiffness - you can do that "
@@ -145,14 +161,16 @@ JSONObject designerBuildRequestBody(JSONArray turn) {
   chatAddMessageField(shapeTool);
   chatAddTorqueField(shapeTool,
     "OPTIONAL. Torque for each joint while holding this shape, 11 integers 0-100, base to "
-    + "tip. 100 = holds rigidly, lower = softer/compliant, 0 = LIMP free hinge that holds no "
-    + "angle (e.g. the chain between the two sticks of a nunchuck). Leave out to keep the "
+    + "tip: the maximum force the motor fights back with when moved off its angle. 100 = holds "
+    + "rigidly; lower = gives in sooner but STILL springs back (still powered); 0 = motor OFF, "
+    + "the ONLY free, freely swinging hinge (e.g. every joint of a nunchuck's chain). Leave out to keep the "
     + "current torque.");
   chatAddStiffnessField(shapeTool,
     "OPTIONAL. Stiffness LEVEL for each joint while holding this shape, 11 integers 0-3, "
     + "base to tip. 0 = full stiffness (holds its angle exactly, springs straight back when "
     + "pushed), 1 = medium, 2 = soft, 3 = very soft (gives way easily, may sag a little "
-    + "under the joints it carries). Stays in effect after the shape. Leave out to keep the "
+    + "under the joints it carries). Every level keeps the motor ON and springing back - for "
+    + "a free hinge use torque 0 instead. Stays in effect after the shape. Leave out to keep the "
     + "current levels.");
   JSONArray tools = new JSONArray();
   tools.append(shapeTool);
@@ -279,7 +297,15 @@ void designerRunTurn(String userText) {
   agentShapeName = best.name;
   agentShapeClosed = best.closed;
   agentShapeSegments = aiCloneSegments(best.segments);
-  final int[] torquePlan = agentsParseTorque(best.input);
+  int[] designerTorque = agentsParseTorque(best.input);
+  int[] designerStiff = agentsParseStiffness(best.input);
+  // ---- Settings Critic: one extra round, ONLY for torque / stiffness ----
+  final ChatSettingsReview sr = SETTINGS_CRITIC_ON ? settingsReview(best, designerTorque, designerStiff) : null;
+  if (sr != null && sr.changed) {
+    designerTorque = sr.torque;
+    designerStiff = sr.stiffness;
+  }
+  final int[] torquePlan = designerTorque;
   agentShapeTorque = torquePlan;
   if (torquePlan != null) {
     chatRunOnMain(new Runnable() {
@@ -287,9 +313,10 @@ void designerRunTurn(String userText) {
         motorsSetTorqueAll(torquePlan);
       }
     });
-    chatAdd("status", "Designer set torque, base to tip: " + motorsTorqueList(torquePlan) + " (0 = limp).");
+    chatAdd("status", (sr != null && sr.changed ? "Torque (after the Settings Critic)" : "Designer set torque")
+      + ", base to tip: " + motorsTorqueList(torquePlan) + " (0 = limp).");
   }
-  final int[] stiffPlan = agentsParseStiffness(best.input);
+  final int[] stiffPlan = designerStiff;
   agentShapeStiffness = stiffPlan;
   if (stiffPlan != null) {
     chatRunOnMain(new Runnable() {
@@ -297,12 +324,14 @@ void designerRunTurn(String userText) {
         aiApplyStiffnessLevels(stiffPlan);
       }
     });
-    chatAdd("status", "Designer set stiffness, base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft).");
+    chatAdd("status", (sr != null && sr.changed ? "Stiffness (after the Settings Critic)" : "Designer set stiffness")
+      + ", base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft).");
   }
 
   String owed = "Applied to the arm. Fit quality " + nf(best.quality, 1, 2)
     + " (lower is better; under " + nf(AI_REFINE_QUALITY_THRESHOLD, 1, 2) + " is good).";
   if (best.critique != null) owed += " Visual critic: " + best.critique.score + "/10, says it looks like: " + best.critique.looksLike + ".";
+  if (sr != null) owed += " " + sr.asFeedback();
   if (best != last) owed += " Your latest revision was judged worse, so the arm is showing your earlier version ('" + best.name + "').";
   // If the last assistant message was text only (it answered instead of revising), nothing is owed.
   JSONObject lastTool = chatLastToolUse(turn);
@@ -569,6 +598,163 @@ ChatCritique criticReview(ChatShapeTry t) {
   }
 }
 
+// =====================================================================
+//  SETTINGS CRITIC (2026-11-20) - one extra review round per designed
+//  shape, ONLY about joint_torque / joint_stiffness. It reads what the
+//  object is (the user's request + the Designer's shape and angles), thinks
+//  about the real object's physical features (rigid vs flexible vs loose
+//  parts, corners that must hold, free-swinging links...) and returns the
+//  final torque + stiffness for all 11 joints - keeping the Designer's plan
+//  where it already fits. Its verdict is applied to the arm, shown in the
+//  chat, and reported back to the Designer so it builds on it in follow-ups.
+//  "settings_critic": false in local_config.json turns it off.
+// =====================================================================
+boolean SETTINGS_CRITIC_ON = true;
+
+String SETTINGS_CRITIC_SYSTEM =
+  "You are the SETTINGS CRITIC for a physical robotic arm. Another agent (the DESIGNER) "
+  + "has already chosen the arm's joint ANGLES to make a shape the user asked for. Your only "
+  + "job is the other two per-joint settings: TORQUE and STIFFNESS. Do not judge or change "
+  + "the angles.\n\n"
+  + AI_ARM_GEOMETRY_NOTE
+  + "=== JOINT SETTINGS ===\n"
+  + AGENT_JOINT_SETTINGS_GUIDE
+  + "\n=== HOW TO REVIEW ===\n"
+  + "1. Name the REAL object and split it into its parts along the arm, base to tip (use "
+  + "the joint angles: big bends mark corners, curls and part boundaries). For each part, "
+  + "ask how the real thing behaves: rigid (a tool, a handle, a frame, a letter, a polygon "
+  + "edge), flexible / springy (a rope, a tail, an antenna, a stem, a cable), or a loose, "
+  + "free hinge (a chain link, a nunchuck's chain, a flail, a pendulum's pivot).\n"
+  + "2. Map that onto the joints: rigid parts and every joint that must HOLD a corner or "
+  + "a curl exactly -> torque 100, stiffness 0. Springy / flexible parts that should give "
+  + "but come back -> stiffness 1-3 at full or medium torque. Weak / gentle parts that still "
+  + "hold -> lower torque. LOOSE parts that swing or hang freely (a chain, a rope's links, a "
+  + "flail, a nunchuck's chain, a pendulum pivot) -> torque EXACTLY 0. Do NOT use low torque "
+  + "or soft stiffness for them: any torque above 0 keeps the motor fighting back, so the "
+  + "part becomes a spring that snaps back instead of swinging. If in doubt whether a part "
+  + "should spring back or hang free, ask what the real object does when you let go of it.\n"
+  + "3. Watch the boundaries: the joint that joins a loose part to a rigid one belongs to "
+  + "the loose part only if the real object bends there; a closed outline's corners all "
+  + "need to hold; a joint with a big bend (far from straight) at low torque or high "
+  + "softness will not keep its angle.\n"
+  + "4. Keep the Designer's values where they already match the object; change only what "
+  + "the object's features call for, and say why. If nothing needs changing, set verdict "
+  + "\"keep\" and repeat the current values. The user's explicit wishes (e.g. 'make the "
+  + "tail stiff') always win over your own idea of the object.\n"
+  + "Always answer with the submit_joint_settings tool, with all 11 values in both lists.";
+
+class ChatSettingsReview {
+  boolean changed = false;
+  int[] torque, stiffness;
+  String reasoning = "", note = "";
+
+  String asFeedback() {
+    if (!changed) return "SETTINGS CRITIC: kept your torque / stiffness (" + reasoning + ").";
+    return "SETTINGS CRITIC (reviews only torque / stiffness for the object's features) changed them to "
+      + "torque " + motorsTorqueList(torque) + ", stiffness " + motorsTorqueList(stiffness)
+      + " - reason: " + reasoning + ". These are on the arm now; build on them in later replies "
+      + "unless the user asks otherwise.";
+  }
+}
+
+JSONObject settingsCriticToolDefinition() {
+  JSONObject props = new JSONObject();
+  JSONObject verdict = chatSchemaProp("string", "\"keep\" = the current values already fit the object; \"changed\" = you changed at least one value.");
+  JSONArray en = new JSONArray();
+  en.append("keep");
+  en.append("changed");
+  verdict.setJSONArray("enum", en);
+  props.setJSONObject("verdict", verdict);
+  props.setJSONObject("parts", chatSchemaProp("string",
+    "The object's parts along the arm, base to tip, each with its joint range and how the real part behaves (rigid / flexible / loose)."));
+  props.setJSONObject("reasoning", chatSchemaProp("string", "One or two sentences: what you changed and why (or why it already fits)."));
+  props.setJSONObject("message_to_user", chatSchemaProp("string", "One short, friendly sentence for the user about the torque / stiffness."));
+  JSONObject schema = new JSONObject();
+  schema.setString("type", "object");
+  schema.setJSONObject("properties", props);
+  JSONObject tool = new JSONObject();
+  tool.setString("name", "submit_joint_settings");
+  tool.setString("description", "Report the final torque and stiffness for all 11 joints.");
+  tool.setJSONObject("input_schema", schema);
+  chatAddTorqueField(tool, "REQUIRED. Final torque for each joint, 11 integers 0-100, base to tip. Any value above 0 keeps the motor on and springing back; 0 = motor off, a free hinge.");
+  chatAddStiffnessField(tool, "REQUIRED. Final stiffness LEVEL for each joint, 11 integers 0-3, base to tip (0 = full ... 3 = very soft).");
+  JSONArray required = new JSONArray();
+  for (String r : new String[] {"verdict", "parts", "joint_torque", "joint_stiffness", "reasoning", "message_to_user"}) required.append(r);
+  schema.setJSONArray("required", required);
+  return tool;
+}
+
+// Reviews torque / stiffness for the shape `t`. designerTorque / designerStiff
+// = the Designer's plans (null = it kept the current values). Returns null if
+// the review couldn't run (then the Designer's plan is used as is).
+ChatSettingsReview settingsReview(ChatShapeTry t, int[] designerTorque, int[] designerStiff) {
+  chatStatus = "Settings Critic is checking torque / stiffness";
+  try {
+    int[] curT = designerTorque != null ? designerTorque : motorTorquePct.clone();
+    int[] curS = designerStiff != null ? designerStiff : hingeStiffnessLevel.clone();
+    StringBuilder asked = new StringBuilder();
+    int from = max(0, designerRequests.size() - 4);
+    for (int i = from; i < designerRequests.size(); i++) {
+      asked.append(i == from ? "" : " -> ").append("\"").append(designerRequests.get(i)).append("\"");
+    }
+    StringBuilder ang = new StringBuilder();
+    for (int i = 0; i < MOTOR_COUNT && t.angles != null && i < t.angles.length; i++) {
+      ang.append(i == 0 ? "" : ", ").append(round(t.angles[i] - 180));
+    }
+    String text = "What the user asked for (oldest first; later messages are edits to the same shape): " + asked
+      + ".\nThe Designer made \"" + t.name + "\"" + (t.closed ? " (a CLOSED outline)" : "")
+      + (t.input.hasKey("message_to_user") ? " and describes it as: \"" + t.input.getString("message_to_user") + "\"" : "")
+      + ".\nIts segments: " + (t.segments != null ? t.segments.format(-1) : "(n/a)")
+      + "\nResulting bend of each joint off straight, degrees, base to tip (joint 1 = motor 2): [" + ang + "]"
+      + "\nTorque the Designer " + (designerTorque != null ? "chose" : "left as it was") + ": " + motorsTorqueList(curT)
+      + "\nStiffness the Designer " + (designerStiff != null ? "chose" : "left as it was") + ": " + motorsTorqueList(curS)
+      + "\nReview torque and stiffness for this object.";
+    JSONArray content = new JSONArray();
+    content.append(chatTextBlock(text));
+    JSONArray messages = new JSONArray();
+    messages.append(chatMessage("user", content));
+
+    JSONObject body = new JSONObject();
+    body.setString("model", ANTHROPIC_MODEL);
+    body.setInt("max_tokens", 1500);
+    JSONArray system = new JSONArray();
+    JSONObject sys = chatTextBlock(SETTINGS_CRITIC_SYSTEM);
+    sys.setJSONObject("cache_control", aiCacheControlEphemeral());
+    system.append(sys);
+    body.setJSONArray("system", system);
+    JSONArray tools = new JSONArray();
+    tools.append(settingsCriticToolDefinition());
+    body.setJSONArray("tools", tools);
+    JSONObject choice = new JSONObject();
+    choice.setString("type", "tool");
+    choice.setString("name", "submit_joint_settings");
+    body.setJSONObject("tool_choice", choice);
+    body.setJSONArray("messages", messages);
+
+    JSONObject resp = agentCall(body, "Settings Critic");
+    if (resp == null) return null;
+    JSONObject tu = chatFindToolUse(resp);
+    if (tu == null) return null;
+    JSONObject in = tu.getJSONObject("input");
+    int[] nt = agentsParseTorque(in), ns = agentsParseStiffness(in);
+    if (nt == null || ns == null) return null; // incomplete answer: keep the Designer's plan
+    ChatSettingsReview r = new ChatSettingsReview();
+    r.torque = nt;
+    r.stiffness = ns;
+    r.changed = !java.util.Arrays.equals(nt, curT) || !java.util.Arrays.equals(ns, curS);
+    r.reasoning = in.hasKey("reasoning") ? in.getString("reasoning") : "";
+    r.note = in.hasKey("message_to_user") ? in.getString("message_to_user") : "";
+    aiLog("[settings critic] " + (r.changed ? "CHANGED" : "kept") + " torque " + motorsTorqueList(nt) + " stiffness "
+      + motorsTorqueList(ns) + " | parts: " + (in.hasKey("parts") ? in.getString("parts") : "") + " | " + r.reasoning);
+    if (r.note.length() > 0) chatAdd("settings", r.note);
+    return r;
+  }
+  catch (Exception e) {
+    aiLog("[settings critic] failed: " + e);
+    return null;
+  }
+}
+
 void chatShowCritique(ChatCritique c) {
   if (c == null) return;
   String msg = (c.note.length() > 0 ? c.note : "Looks like: " + c.looksLike + ".") + "  (" + c.score + "/10)";
@@ -721,7 +907,8 @@ JSONObject motionBuildRequestBody(JSONArray turn) {
   chatAddMessageField(animTool);
   chatAddTorqueField(animTool,
     "OPTIONAL. Torque for each joint WHILE this animation plays, 11 integers 0-100, base to "
-    + "tip (restored when it stops). 100 = full strength, lower = weaker/softer, 0 = LIMP: "
+    + "tip (restored when it stops). 100 = full strength; lower = weaker but STILL powered "
+    + "and springing back to its angle; 0 = motor OFF, the only setting where "
     + "the joint swings freely, driven only by the motion of the joints around it (chains, "
     + "ropes, a nunchuck's link). Start from the Designer's torque plan if one was given. "
     + "Leave out to keep the current torque. joint_stiffness (0-3 levels) is the other "
@@ -830,6 +1017,7 @@ void motionRunTurn(String userText) {
 // Sends a request; returns the parsed reply, or null after showing the
 // problem in the chat.
 JSONObject agentCall(JSONObject body, String who) {
+  agentsApplyTemperature(body); // AGENT_TEMPERATURE (Gui_3_0.pde)
   try {
     String json = aiCallAnthropic(body.toString());
     JSONObject resp = JSONObject.parse(json);

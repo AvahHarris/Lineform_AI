@@ -218,12 +218,14 @@ String chatTagFor(String who) {
   if (who.equals("claude")) return "Designer";
   if (who.equals("motion")) return "Motion";
   if (who.equals("critic")) return "Critic";
+  if (who.equals("settings")) return "Settings Critic";
   return "";
 }
 
 color chatTagColor(String who) {
   if (who.equals("motion")) return THEME_PINK;
   if (who.equals("critic")) return THEME_YELLOW;
+  if (who.equals("settings")) return THEME_PURPLE;
   return THEME_TEAL;
 }
 
@@ -307,6 +309,7 @@ void drawChatPanel() {
       else if (note) fill(22, 60, 66);
       else if (e.who.equals("motion")) fill(82, 40, 86);
       else if (e.who.equals("critic")) fill(78, 68, 26);
+      else if (e.who.equals("settings")) fill(58, 44, 96);
       else fill(48, 59, 92);
       rect(uiX(x), uiY(y), w * uiScale, h * uiScale, 9 * uiScale);
 
