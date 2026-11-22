@@ -299,7 +299,7 @@ void modesApplyControls() {
     }
   }
   // Create Shape / Reset, and the whole AI chat panel's controls.
-  for (String n : new String[] {"Create Shape", "Reset",
+  for (String n : new String[] {"Create Shape", "Reset", "Save Animation", "Load Shape", "Load Animation",
                                 "Chat Input", "Send", "New Chat", "Critic Toggle", "Mode Shape", "Mode Animate"}) {
     Controller c = cp5.getController(n);
     if (c != null) c.setVisible(!m);
@@ -414,7 +414,7 @@ void drawManipulationHint() {
   textFont(hudFont);
   hudTextSize(13);
   fill(THEME_TEXT);
-  hudText("Bars show the real angles. Save Shape saves as \"hand pose <time>\".", SLIDER_X, y + 28);
+  hudText("Bars show the real angles. Save Shape suggests \"hand pose <time>\".", SLIDER_X, y + 28);
   hudText("Create Shape / Reset return in Automation mode.", SLIDER_X, y + 46);
   popStyle();
 }

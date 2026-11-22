@@ -566,7 +566,7 @@ StringBuilder aiLastJointReport = new StringBuilder();
 
 // v8: let Claude route exact synonyms/translations of a saved shape to its
 // calibrated preset (see aiBuildRequestBody). false = always generate fresh.
-boolean AI_USE_LIBRARY_MATCH = true;
+boolean AI_USE_LIBRARY_MATCH = false; // 2026-11-21: off - shapes load only with Load Shape (Files.pde)
 
 // v9: two-phase anchoring. Phase 1 fits every trial with the shape's start
 // point on the fixed base. Only if EVERY base-anchored trial scores worse
@@ -638,19 +638,16 @@ float[] generatedAngles = new float[MOTOR_COUNT];
 // Prevents slider updates from triggering unwanted repeated events.
 boolean updatingShapeControls = false;
 
-// Calibrated preset shapes, tuned directly on the real robot (Motor 2 ..
-// Motor 12, in order), loaded from shape_library.json next to this sketch
-// instead of being hardcoded here. Each entry has a name, a list of prompt
-// synonyms that match straight to it (no AI call), and small/large angle
-// arrays that Shape Size interpolates between - same mechanism as an
-// AI-generated shape's aiSmallAngles/aiLargeAngles. Growing the library
-// (new shape, new synonym) is now a data change (edit the JSON, or press
-// "Save Shape" to capture the current sliders under a new name), not a code
-// change - see loadShapeLibrary()/saveShapeToLibrary() below.
-JSONArray shapeLibraryData;
+// Shapes loaded with Load Shape this session (Files.pde), by name: small /
+// large angle arrays that Shape Size interpolates between (0.5 = the saved
+// pose) - same mechanism as an AI shape's aiSmallAngles/aiLargeAngles.
+JSONArray shapeLibraryData; // unused since 2026-11-21 (name matching is off - AI_USE_LIBRARY_MATCH)
 HashMap<String, float[]> shapeLibrarySmall = new HashMap<String, float[]>();
 HashMap<String, float[]> shapeLibraryLarge = new HashMap<String, float[]>();
-String SHAPE_LIBRARY_FILENAME = "shape_library.json";
+// Optional per-entry joint settings (2026-11-21): "torque" (11 x 0-100) and
+// "stiffness" (11 x level 0-3). Entries without them keep the current settings.
+HashMap<String, int[]> shapeLibraryTorque = new HashMap<String, int[]>();
+HashMap<String, int[]> shapeLibraryStiffness = new HashMap<String, int[]>();
 
 // Logical coordinate system: all original GUI positions are in this space.
 final float UI_DESIGN_WIDTH = 1600.0;
@@ -765,8 +762,13 @@ void layoutResponsiveGUI() {
   positionControl("Reset", SLIDER_X + 190, buttonY, 130, 60);
   positionControl("Shape Size", SLIDER_X, buttonY + 80, 250, 22);
 
-  positionControl("Save Shape", SLIDER_X, buttonY + 118, 150, 36);
-  positionControl("Stop Animation", SLIDER_X + 170, buttonY + 118, 150, 36);
+  // Row 1: Create Shape | Reset | Stop Animation. Rows 2-3: Save / Load for
+  // shapes, then animations (2026-11-21).
+  positionControl("Stop Animation", SLIDER_X + 380, buttonY, 130, 60);
+  positionControl("Save Shape", SLIDER_X, buttonY + 76, 160, 36);
+  positionControl("Load Shape", SLIDER_X + 170, buttonY + 76, 160, 36);
+  positionControl("Save Animation", SLIDER_X, buttonY + 120, 160, 36);
+  positionControl("Load Animation", SLIDER_X + 170, buttonY + 120, 160, 36);
   layoutChatPanel();
   // Camera distance is deliberately NOT changed on resize - perspective
   // already scales the scene with window height; shrinking the distance too
@@ -791,7 +793,7 @@ void layoutResponsiveGUI() {
       slider.getValueLabel().setFont(valueFont);
     }
   }
-  String[] buttons = {"Create Shape", "Reset", "Save Shape", "Stop Animation",
+  String[] buttons = {"Create Shape", "Reset", "Save Shape", "Stop Animation", "Save Animation", "Load Shape", "Load Animation",
                       "Send", "New Chat"};
   for (String name : buttons) {
     Controller button = cp5.getController(name);
@@ -858,7 +860,7 @@ void setup() {
   aiLog("=== New session " + year() + "-" + nf(month(),2) + "-" + nf(day(),2)
     + " " + nf(hour(),2) + ":" + nf(minute(),2) + ":" + nf(second(),2) + " ===");
 
-  loadShapeLibrary();
+  // (Nothing is loaded at startup: Load Shape / Load Animation - Files.pde.)
   loadFitHistory();
 
   ANTHROPIC_API_KEY = loadApiKey();
@@ -966,11 +968,7 @@ void setup() {
   // view were removed 2026-11-16: stiffness is now set per row with the
   // ANGLE | TORQUE | STIFF selector - see Motors.pde.)
 
-  // Captures whatever's on the sliders RIGHT NOW into shape_library.json
-  // under whatever name is currently typed in the AI Prompt box above -
-  // the other half of the shape library loop: once a shape looks right
-  // (AI-generated, hand-tweaked, whatever), this is how it becomes an
-  // instantly-reusable preset without me hand-transcribing numbers.
+  // Saves the bars + torque + stiffness to a shape .json file (Files.pde).
   cp5.addButton("Save Shape")
     .setPosition(SLIDER_X, buttonY + buttonH + 20 + 70)
     .setSize(150, 36)
@@ -980,6 +978,16 @@ void setup() {
     .setPosition(SLIDER_X + 170, buttonY + buttonH + 20 + 70)
     .setSize(150, 36)
     .setLabel("Stop Animation");
+
+  // Records 3 s of the playing animation, then asks where to save it (AnimLibrary.pde / Files.pde).
+  cp5.addButton("Save Animation")
+    .setPosition(SLIDER_X + 340, buttonY + buttonH + 20 + 70)
+    .setSize(150, 36)
+    .setLabel("Save Animation");
+
+  // Open a single shape / animation .json file (Files.pde).
+  cp5.addButton("Load Shape").setSize(150, 36).setLabel("Load Shape");
+  cp5.addButton("Load Animation").setSize(150, 36).setLabel("Load Animation");
 
   // Shape Chat panel on the right (see Chat.pde) - the one place to ask
   // Claude for shapes and animations and keep refining them.
@@ -1188,36 +1196,31 @@ void controlEvent(ControlEvent theEvent) {
   // Motor rows: ANGLE/TORQUE switches, torque sliders, live angle drags.
   if (motorsHandleControlEvent(name, theEvent.getValue())) return;
 
+  // Save Animation button -> the last played animation into animation_library.json.
+  if (name.equals("Save Animation")) {
+    animLibrarySaveButton();
+    return;
+  }
+
   // Stop Animation button -> halt playback wherever it currently is.
   if (name.equals("Stop Animation")) {
     aiStopAnimation();
     return;
   }
 
-  // Save Shape button -> capture the CURRENT slider angles into
-  // shape_library.json. Name = whatever is typed in the chat box (without
+  // Save / Load buttons -> file dialogs (Files.pde). Save Shape's default
+  // name = whatever is typed in the chat box (without
   // sending it), otherwise the current shape's name.
   if (name.equals("Save Shape")) {
-    // Manipulation mode hides the chat box, so a hand-made pose gets a
-    // timestamped name instead (rename it in shape_library.json if needed).
-    if (manipulationMode) {
-      String poseName = "hand pose " + year() + nf(month(), 2) + nf(day(), 2) + "-" + nf(hour(), 2) + nf(minute(), 2) + nf(second(), 2);
-      saveShapeToLibrary(poseName);
-      noticeAdd("status", "Saved the hand-made pose as \"" + poseName + "\".");
-      println("Saved the hand-made pose as \"" + poseName + "\".");
-      return;
-    }
-    String rawName = (chatInput != null) ? chatInput.getText() : "";
-    if (rawName == null || rawName.trim().length() == 0) {
-      rawName = selectedShape.startsWith("ai: ") ? selectedShape.substring(4) : selectedShape;
-    }
-    if (rawName == null || rawName.trim().length() == 0 || rawName.trim().equals("none")) {
-      noticeAdd("status", "To save, type a name in the chat box (don't press Send), then press Save Shape.");
-      return;
-    }
-    saveShapeToLibrary(rawName);
-    if (chatInput != null) chatInput.clear();
-    noticeAdd("status", "Saved the current sliders as \"" + rawName.trim().toLowerCase() + "\".");
+    filesSaveShapeButton(); // "Save shape as..." dialog (Files.pde)
+    return;
+  }
+  if (name.equals("Load Shape")) {
+    filesLoadShapeButton();
+    return;
+  }
+  if (name.equals("Load Animation")) {
+    filesLoadAnimationButton();
     return;
   }
 
@@ -1742,97 +1745,9 @@ String loadApiKey() {
   return null;
 }
 
-// Loads shape_library.json (next to this sketch) into shapeLibraryData plus
-// the shapeLibrarySmall/Large lookup maps used by generateShapeAngles().
-// Called once from setup(). If the file is missing (fresh checkout, or it
-// got deleted), starts with an empty library rather than failing - "Save
-// Shape" can rebuild it from scratch, and aiMatchKnownShape() simply never
-// matches until then, so every prompt just falls through to the AI path.
-void loadShapeLibrary() {
-  String path = sketchPath(SHAPE_LIBRARY_FILENAME);
-  File f = new File(path);
-  if (!f.exists()) {
-    println("No " + SHAPE_LIBRARY_FILENAME + " found next to the sketch - starting with an "
-      + "empty shape library. Use \"Save Shape\" to add to it.");
-    shapeLibraryData = new JSONArray();
-    return;
-  }
-
-  shapeLibraryData = loadJSONArray(path);
-  shapeLibrarySmall.clear();
-  shapeLibraryLarge.clear();
-  for (int i = 0; i < shapeLibraryData.size(); i++) {
-    JSONObject entry = shapeLibraryData.getJSONObject(i);
-    String entryName = entry.getString("name");
-    shapeLibrarySmall.put(entryName, entry.getJSONArray("small").getFloatArray());
-    shapeLibraryLarge.put(entryName, entry.getJSONArray("large").getFloatArray());
-  }
-  println("Loaded " + shapeLibraryData.size() + " shape(s) from " + SHAPE_LIBRARY_FILENAME + ": "
-    + shapeLibrarySmall.keySet());
-}
-
-// Captures the CURRENT slider angles as a new (or updated) library entry
-// named `rawName`, derives small/large the same way the original five
-// presets were derived (scale each motor's offset from 180 by
-// AI_SIZE_MIN_SCALE/MAX_SCALE), writes shape_library.json back out, and
-// updates the in-memory maps immediately so it's usable without restarting
-// Processing. If `rawName` already matches an existing entry (by name or
-// synonym), that entry is overwritten rather than duplicated.
-void saveShapeToLibrary(String rawName) {
-  String entryName = rawName.trim().toLowerCase();
-
-  float[] current = new float[MOTOR_COUNT];
-  float[] small = new float[MOTOR_COUNT];
-  float[] large = new float[MOTOR_COUNT];
-  for (int i = 0; i < MOTOR_COUNT; i++) {
-    current[i] = cp5.get(Slider.class, "Motor " + (i + 2)).getValue();
-    float turn = current[i] - 180;
-    small[i] = 180 + turn * AI_SIZE_MIN_SCALE;
-    large[i] = 180 + turn * AI_SIZE_MAX_SCALE;
-  }
-
-  // Overwrite in place if this name (or one of its synonyms) already
-  // exists, instead of appending a duplicate entry.
-  int existingIndex = -1;
-  for (int i = 0; i < shapeLibraryData.size(); i++) {
-    JSONObject entry = shapeLibraryData.getJSONObject(i);
-    if (entry.getString("name").equals(entryName)) { existingIndex = i; break; }
-    JSONArray syns = entry.getJSONArray("synonyms");
-    for (int s = 0; s < syns.size(); s++) {
-      if (syns.getString(s).equals(entryName)) { existingIndex = i; break; }
-    }
-    if (existingIndex != -1) break;
-  }
-
-  JSONObject entry = (existingIndex != -1) ? shapeLibraryData.getJSONObject(existingIndex) : new JSONObject();
-  entry.setString("name", entryName);
-  if (!entry.hasKey("synonyms")) {
-    JSONArray syns = new JSONArray();
-    syns.append(entryName);
-    entry.setJSONArray("synonyms", syns);
-  }
-  JSONArray smallArr = new JSONArray();
-  JSONArray largeArr = new JSONArray();
-  for (int i = 0; i < MOTOR_COUNT; i++) {
-    smallArr.append(small[i]);
-    largeArr.append(large[i]);
-  }
-  entry.setJSONArray("small", smallArr);
-  entry.setJSONArray("large", largeArr);
-
-  if (existingIndex != -1) {
-    shapeLibraryData.setJSONObject(existingIndex, entry);
-  } else {
-    shapeLibraryData.append(entry);
-  }
-
-  saveJSONArray(shapeLibraryData, sketchPath(SHAPE_LIBRARY_FILENAME));
-  shapeLibrarySmall.put(entryName, small);
-  shapeLibraryLarge.put(entryName, large);
-
-  println("Saved \"" + entryName + "\" to " + SHAPE_LIBRARY_FILENAME + " (" + current.length
-    + " motor angles). Ask for \"" + entryName + "\" in the chat any time to load it.");
-}
+// (2026-11-21) Shapes are saved / loaded as single files with the file
+// dialogs (Files.pde). shape_library.json is no longer read; the lookup maps
+// above only hold shapes loaded with Load Shape this session.
 
 // Loads AI_FIT_HISTORY_FILENAME (a simple append-only CSV next to the
 // sketch) into aiBestFitQualityEver, keeping only the best (lowest) fit
@@ -1946,6 +1861,14 @@ void aiUseKnownShape(String shapeKey, String originalPrompt) {
   generateShapeAngles();
   applyGeneratedAnglesToSliders();
 
+  // Saved joint settings (entries saved since 2026-11-21); older entries
+  // without them keep the current torque / stiffness.
+  int[] tq = shapeLibraryTorque.get(shapeKey);
+  int[] st = shapeLibraryStiffness.get(shapeKey);
+  if (tq != null) motorsSetTorqueAll(tq);
+  if (st != null) aiApplyStiffnessLevels(st);
+  agentsNoteLoadedShape(shapeKey, tq, st); // both agents get the loaded shape as context (Agents.pde)
+
   println("\"" + originalPrompt + "\" matched the calibrated " + shapeKey
     + " shape - using the tuned preset (no AI call needed). Press Create "
     + "Shape to send it, or drag Shape Size to resize it.");
@@ -1969,7 +1892,7 @@ void triggerAIShape(String prompt) {
   // circle/square presets above, use that tuned data directly instead of
   // asking the AI to reinvent it from scratch - it's real values already
   // validated on the robot, so it's strictly more accurate than a guess.
-  String knownShape = aiMatchKnownShape(promptLower);
+  String knownShape = AI_USE_LIBRARY_MATCH ? aiMatchKnownShape(promptLower) : null;
   if (knownShape != null) {
     aiUseKnownShape(knownShape, prompt.trim());
     return;
@@ -2216,12 +2139,16 @@ void aiStartAnimation(AIAnimationResult result) {
   }
   aiStopAnimation(); // never leave an old animation silently playing under a new one
   aiAnimName = result.animationName;
-  aiAnimIsWave = result.isTravelingWave;
+  aiAnimIsWave = result.isTravelingWave && result.recording == null;
+  aiAnimRecording = result.recording; // non-null = replay a saved recording (AnimLibrary.pde)
   aiAnimPoses.clear();
   aiAnimPoseNames.clear();
   aiAnimPoseFits.clear();
 
-  if (aiAnimIsWave) {
+  if (aiAnimRecording != null) {
+    aiLog("--- Replaying saved animation '" + result.animationName + "' (" + aiAnimRecording.frames.size()
+      + " frames over " + aiAnimRecording.durationMs + " ms + " + aiAnimRecording.resetMs + " ms reset, looping) ---");
+  } else if (aiAnimIsWave) {
     aiLog("--- Generating animation '" + result.animationName + "' (traveling wave, "
       + nf(result.waveAmplitudeDeg, 1, 0) + "° amplitude, " + nf(result.waveWavelengthJoints, 1, 1)
       + " joints/cycle, " + nf(result.wavePeriodMs, 1, 0) + "ms/cycle, direction "
@@ -2277,6 +2204,7 @@ void aiStartAnimation(AIAnimationResult result) {
   // shape already lock/unlock it elsewhere, and restore it in aiStopAnimation().
   cp5.getController("Shape Size").setLock(true);
 
+  aiLastAnimation = result;   // what the agents are told about / Save Animation records (AnimLibrary.pde)
   aiLog("Animation '" + aiAnimName + "' playing - press Stop Animation to end it.");
 }
 
@@ -2290,8 +2218,10 @@ int[] aiStiffnessBeforeAnim = null; // levels from before the running animation 
 
 void aiStopAnimation() {
   if (!aiAnimating) return;
+  animRecordCancel("the animation stopped"); // a Save Animation still recording is dropped
   aiAnimating = false;
   aiAnimIsWave = false;
+  aiAnimRecording = null;
   cp5.getController("Shape Size").setLock(false);
 
   // Stiffness back to what it was before the animation (2026-11-18; it used
@@ -2315,12 +2245,15 @@ void aiStopAnimation() {
 //     aiSampleAnimationLoop()'s cyclic Catmull-Rom spline.
 void aiUpdateAnimation() {
   if (!aiAnimating) return;
-  if (!aiAnimIsWave && aiAnimPoses.size() < 2) return;
+  if (aiAnimRecording == null && !aiAnimIsWave && aiAnimPoses.size() < 2) return;
 
   int now = millis();
   float[] sampled;
 
-  if (aiAnimIsWave) {
+  if (aiAnimRecording != null) {
+    sampled = animRecordingSample(aiAnimRecording, now - aiAnimLoopStartMillis); // also applies torque / stiffness changes
+    aiAnimIndex = 0;
+  } else if (aiAnimIsWave) {
     float phase = (now - aiAnimLoopStartMillis) / aiAnimWavePeriodMs; // grows forever - only ever used inside sin(), which wraps it on its own
     sampled = aiSampleTravelingWave(aiAnimWaveAmplitudeDeg, aiAnimWaveWavelengthJoints, phase, aiAnimWaveDirection);
 
@@ -2346,6 +2279,7 @@ void aiUpdateAnimation() {
 
   arrayCopy(sampled, generatedAngles);
   applyGeneratedAnglesToSliders();
+  animRecordTick(sampled, now); // Save Animation: captures frames while recording (AnimLibrary.pde)
 
   if (now - aiAnimLastSendMillis >= AI_ANIM_SEND_INTERVAL_MS) {
     aiSendSlidersOverSerial();
@@ -2456,6 +2390,8 @@ class AIAnimationResult {
   // valid, even when the model omits joint_stiffness entirely.
   int[] jointStiffness = new int[MOTOR_COUNT];
   boolean stiffnessGiven = false; // false = joint_stiffness omitted: keep the current levels
+  JSONObject source = null;                  // the raw emit_shape_animation input (saved with the animation)
+  AnimRecording recording = null;            // a saved 3 s recording (AnimLibrary.pde) - replayed as is
 
   // Set when the model chose traveling_wave instead of poses - a motion
   // that's a sine wave propagating along the chain (snake/eel/whip/flag),
@@ -2512,6 +2448,7 @@ AIAnimationResult aiCallAndParseAnimation(String requestBodyJson) {
 // AIAnimationResult. Shared by triggerAIAnimation() and the Shape Chat.
 AIAnimationResult aiParseAnimationInput(JSONObject input) {
   AIAnimationResult result = new AIAnimationResult();
+  result.source = input;
   try {
     result.animationName = input.hasKey("animation_name") ? input.getString("animation_name") : "animation";
 
@@ -3089,7 +3026,7 @@ JSONObject aiBuildToolDefinition() {
     "OPTIONAL. Exact name of a calibrated library shape (listed in the user message) - "
     + "ONLY when the request means exactly that shape (synonym/rephrasing/translation). "
     + "Omit if the request adds any qualifier such as 'isosceles' or 'equilateral'.");
-  properties.setJSONObject("library_match", libraryMatchProp);
+  if (AI_USE_LIBRARY_MATCH) properties.setJSONObject("library_match", libraryMatchProp); // off: shapes load with Load Shape
 
 
   schema.setJSONObject("properties", properties);

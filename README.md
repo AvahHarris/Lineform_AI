@@ -4,7 +4,7 @@
 
 - `gui/Gui_3_0/` – Processing sketch (open `Gui_3_0.pde` in Processing). All `.pde` tabs must stay in this folder.
   - `local_config.json` – per-arm GUI settings (`active_motors`, `base_block_first`). Git-ignored; copy `local_config.example.json` to create it.
-  - `shape_library.json` – saved shape library, loaded at startup.
+  - `shapes/`, `animations/` – saved shapes / animations, one `.json` file each (Save / Load buttons; the dialogs start here, but files can live anywhere). `shapes/` holds the 10 calibrated presets. `shape_library.json` is no longer read.
   - `logs/` – runtime output: `ai_debug_log.txt` (overwritten each run, not committed) and `ai_fit_history.csv` (fit-quality history across runs).
 - `firmware/lineform-ai/` – Arduino sketch (`lineform-ai.ino`). Serial at 115200 baud.
   - `local_config.h` – per-arm settings (reversed motors, `ACTIVE_MOTORS`). Git-ignored; copy `local_config.example.h` to create it.

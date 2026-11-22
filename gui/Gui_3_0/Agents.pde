@@ -200,7 +200,7 @@ void designerRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : chatPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + chatStateNote()));
+  content.append(chatTextBlock(userText + agentsTakeLoadedNote(false) + chatStateNote()));
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 
@@ -225,7 +225,7 @@ void designerRunTurn(String userText) {
     return;
   }
 
-  // calibrated preset from shape_library.json?
+  // calibrated preset? (off since 2026-11-21: AI_USE_LIBRARY_MATCH - shapes load with Load Shape)
   if (AI_USE_LIBRARY_MATCH && input.hasKey("library_match")) {
     final String match = aiMatchKnownShape(input.getString("library_match").trim().toLowerCase());
     if (match != null) {
@@ -239,8 +239,8 @@ void designerRunTurn(String userText) {
       agentShapeName = match;
       agentShapeClosed = false;
       agentShapeSegments = null;
-      agentShapeTorque = null;
-      agentShapeStiffness = null;
+      agentShapeTorque = shapeLibraryTorque.get(match);       // null for older entries
+      agentShapeStiffness = shapeLibraryStiffness.get(match);
       chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, "Used the calibrated preset '"
         + match + "' from the shape library (tuned on the real arm). It is now on the arm.");
       chatAdd("claude", chatMessageForUser(input, "That's my calibrated \"" + match + "\" - loaded it."));
@@ -843,6 +843,65 @@ float chatAxis(PVector p, int axis) {
 }
 
 // =====================================================================
+//  LOADED SHAPE / ANIMATION CONTEXT (2026-11-21)
+//  Whenever a saved shape or animation is loaded, BOTH agents get a note
+//  with its saved parameters on their next message, saying the user loaded
+//  it and is working on it now - so "bigger" / "faster" / "softer" refer to it.
+// =====================================================================
+String agentsLoadedNoteDesigner = null;
+String agentsLoadedNoteMotion = null;
+
+// The pending note for one agent (once), or "".
+String agentsTakeLoadedNote(boolean motion) {
+  String n = motion ? agentsLoadedNoteMotion : agentsLoadedNoteDesigner;
+  if (motion) agentsLoadedNoteMotion = null;
+  else agentsLoadedNoteDesigner = null;
+  return n == null ? "" : n;
+}
+
+String agentsTurnsList(float[] internalDeg) {
+  StringBuilder sb = new StringBuilder();
+  for (int i = 0; i < internalDeg.length; i++) sb.append(i == 0 ? "" : ", ").append(round(internalDeg[i] - 180));
+  return "[" + sb + "]";
+}
+
+void agentsNoteLoadedShape(String name, int[] torque, int[] stiffness) {
+  float[] now = new float[MOTOR_COUNT];
+  for (int i = 0; i < MOTOR_COUNT; i++) now[i] = cp5.getController("Motor " + (i + 2)).getValue();
+  String params = "joint bends off straight, degrees, base to tip: " + agentsTurnsList(now)
+    + (torque != null ? "; torque " + motorsTorqueList(torque) : "; torque: unchanged (not saved with it)")
+    + (stiffness != null ? "; stiffness " + motorsTorqueList(stiffness) : "; stiffness: unchanged (not saved with it)");
+  agentsLoadedNoteDesigner = "\n\n[CONTEXT: the user LOADED the saved shape '" + name + "' from the shape library "
+    + "(tuned on the real arm) and it is on the arm now. This is the shape we are working on: follow-ups like "
+    + "'bigger', 'curl the tip more', 'softer' refer to THIS shape. Saved parameters - " + params + ". It has no "
+    + "segment list: to change it, describe the whole shape as segments that reproduce these bends, with the "
+    + "requested change applied.]";
+  agentsLoadedNoteMotion = "\n\n[CONTEXT: the user LOADED the saved shape '" + name + "' and it is on the arm now. "
+    + "This is the shape we are working on: animate THIS shape. Saved parameters - " + params + ".]";
+  agentShapeName = name;
+  agentShapeSegments = null;
+  agentShapeClosed = false;
+  agentShapeTorque = torque;
+  agentShapeStiffness = stiffness;
+}
+
+void agentsNoteLoadedAnimation(String name, AnimRecording rec, JSONObject source) {
+  String summary = rec.summaryForAgents();
+  agentsLoadedNoteMotion = "\n\n[CONTEXT: the user LOADED the saved animation '" + name + "' from the animation "
+    + "library and it is playing now. This is the animation we are working on: follow-ups like 'faster', "
+    + "'bigger swing', 'softer tail' refer to THIS animation. It is a " + nf(rec.durationMs / 1000.0, 1, 1)
+    + " s recording replayed in a loop (" + nf(rec.resetMs / 1000.0, 1, 1) + " s return to the start between "
+    + "loops). Saved parameters - " + summary + "."
+    + (source != null ? " It was originally made from this emit_shape_animation input: " + source.format(-1)
+       + ". To change it, send a COMPLETE new animation based on that input with the requested change applied."
+       : " To change it, send a COMPLETE new animation that reproduces this motion with the requested change applied.")
+    + "]";
+  agentsLoadedNoteDesigner = "\n\n[CONTEXT: the user LOADED the saved animation '" + name + "' and it is playing "
+    + "now (the Motion agent's job). Saved parameters - " + summary + ". If the user asks for a still shape, they "
+    + "probably mean a pose from this animation.]";
+}
+
+// =====================================================================
 //  MOTION
 // =====================================================================
 
@@ -956,7 +1015,7 @@ void motionRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : motionPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + motionShapeContext() + angles + chatStateNote()));
+  content.append(chatTextBlock(userText + agentsTakeLoadedNote(true) + motionShapeContext() + angles + chatStateNote()));
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 

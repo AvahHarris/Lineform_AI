@@ -158,6 +158,9 @@ void applyTheme() {
   themeButton("Reset", THEME_ORANGE);
   themeButton("Save Shape", THEME_PURPLE);
   themeButton("Stop Animation", THEME_PINK);
+  themeButton("Save Animation", THEME_PURPLE);
+  themeButton("Load Shape", color(70, 82, 120));
+  themeButton("Load Animation", color(70, 82, 120));
   themeButton("Send", THEME_BLUE);
   themeButton("New Chat", color(70, 82, 120));
 
