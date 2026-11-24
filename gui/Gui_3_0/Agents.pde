@@ -118,7 +118,11 @@ String DESIGNER_SYSTEM_TAIL =
   + "- Every message continues the same design session. When the user asks for "
   + "a change ('make the head bigger', 'curl the tip the other way'), start from "
   + "YOUR MOST RECENT shape in this conversation and change only what they asked "
-  + "for. Always send the COMPLETE updated shape, never just the changed part.\n"
+  + "for. Always send the COMPLETE updated shape, never just the changed part. EXCEPTION: "
+  + "if a message carries a LOADED SHAPE / LOADED ANIMATION note, that loaded item is the "
+  + "current one and its rules win over this.\n"
+  + "- Your shape is shown as a ghost preview in the 3D view; the user presses Create Shape "
+  + "to send it to the arm. Your torque / stiffness are applied to the motors immediately.\n"
   + "- Each tool result tells you what is now on the arm and how well it fit "
   + "(fit quality: lower is better, under 0.70 is good). Each user message ends "
   + "with a bracketed note about the arm's current state; use it, but don't "
@@ -174,6 +178,7 @@ JSONObject designerBuildRequestBody(JSONArray turn) {
     + "current levels.");
   JSONArray tools = new JSONArray();
   tools.append(shapeTool);
+  if (loadedIs("shape")) tools.append(loadedShapeToolDefinition()); // change the loaded shape in place (Loaded.pde)
   body.setJSONArray("tools", tools);
   body.setJSONObject("tool_choice", chatAutoToolChoice());
 
@@ -200,7 +205,7 @@ void designerRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : chatPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + agentsTakeLoadedNote(false) + chatStateNote()));
+  content.append(chatTextBlock(userText + loadedNoteFor(false) + chatStateNote())); // loaded file: Loaded.pde
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 
@@ -219,6 +224,15 @@ void designerRunTurn(String userText) {
     return;
   }
   JSONObject input = toolUse.getJSONObject("input");
+  if (toolUse.getString("name").equals("adjust_loaded_shape")) {
+    final JSONObject adj = input;
+    final String[] res = new String[1];
+    chatRunOnMain(new Runnable() { public void run() { res[0] = loadedApplyShapeAdjust(adj); } });
+    chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, res[0]);
+    chatAdd("claude", chatMessageForUser(input, "Adjusted the loaded shape."));
+    chatAdd("status", "Loaded shape adjusted. Press Create Shape to send it to the arm.");
+    return;
+  }
   if (!toolUse.getString("name").equals("emit_shape_segments")) {
     chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, "ERROR: unknown tool.");
     chatAdd("error", "The Designer used an unknown tool.");
@@ -294,6 +308,7 @@ void designerRunTurn(String userText) {
 
   // Put the winner on the arm and close out the turn.
   chatApplyBest(best, last);
+  loadedClear("the Designer made a new shape");
   agentShapeName = best.name;
   agentShapeClosed = best.closed;
   agentShapeSegments = aiCloneSegments(best.segments);
@@ -310,7 +325,7 @@ void designerRunTurn(String userText) {
   if (torquePlan != null) {
     chatRunOnMain(new Runnable() {
       public void run() {
-        motorsSetTorqueAll(torquePlan);
+        applyJointSettingsNow(torquePlan, null); // instant (Staging.pde)
       }
     });
     chatAdd("status", (sr != null && sr.changed ? "Torque (after the Settings Critic)" : "Designer set torque")
@@ -321,14 +336,14 @@ void designerRunTurn(String userText) {
   if (stiffPlan != null) {
     chatRunOnMain(new Runnable() {
       public void run() {
-        aiApplyStiffnessLevels(stiffPlan);
+        applyJointSettingsNow(null, stiffPlan); // instant (Staging.pde)
       }
     });
     chatAdd("status", (sr != null && sr.changed ? "Stiffness (after the Settings Critic)" : "Designer set stiffness")
       + ", base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft).");
   }
 
-  String owed = "Applied to the arm. Fit quality " + nf(best.quality, 1, 2)
+  String owed = "Fitted - shown to the user as a ghost preview; it goes to the arm when they press Create Shape. Fit quality " + nf(best.quality, 1, 2)
     + " (lower is better; under " + nf(AI_REFINE_QUALITY_THRESHOLD, 1, 2) + " is good).";
   if (best.critique != null) owed += " Visual critic: " + best.critique.score + "/10, says it looks like: " + best.critique.looksLike + ".";
   if (sr != null) owed += " " + sr.asFeedback();
@@ -394,7 +409,9 @@ ChatShapeTry chatTryShape(JSONObject toolUse, final int attempt) {
   chatStatus = "Fitting \"" + t.name + "\" to the arm";
   chatRunOnMain(new Runnable() {
     public void run() {
-      aiStopAnimation();
+      // Fitted WITHOUT touching the bars or a playing animation: the result is
+      // shown as the ghost arm until Create Shape (Staging.pde).
+      stagedWithBarsKept(new Runnable() { public void run() {
       aiAnchorAtCenter = false;
       aiGenerateFromSegments(aiCloneSegments(t.segments), t.closed, t.name);
       t.quality = aiLastFitQuality;
@@ -415,6 +432,7 @@ ChatShapeTry chatTryShape(JSONObject toolUse, final int attempt) {
       arrayCopy(generatedAngles, t.angles);
       t.curved = aiShapeIsCurved;
       aiRecordFitHistory(t.name, attempt, t.quality);
+      } });
     }
   });
   aiLog("[designer] fit '" + t.name + "': " + nf(t.quality, 1, 2) + (t.centered ? " (centered)" : ""));
@@ -423,12 +441,14 @@ ChatShapeTry chatTryShape(JSONObject toolUse, final int attempt) {
 
 // Puts `best` back on the arm if something else was fitted after it.
 void chatApplyBest(final ChatShapeTry best, ChatShapeTry lastFitted) {
-  if (best == lastFitted) return;
   chatRunOnMain(new Runnable() {
     public void run() {
-      aiAnchorAtCenter = best.centered;
-      aiGenerateFromSegments(aiCloneSegments(best.segments), best.closed, best.name);
-      aiAnchorAtCenter = false;
+      if (best != lastFitted) stagedWithBarsKept(new Runnable() { public void run() {
+        aiAnchorAtCenter = best.centered;
+        aiGenerateFromSegments(aiCloneSegments(best.segments), best.closed, best.name);
+        aiAnchorAtCenter = false;
+      } });
+      stageShapePose(best.name, best.angles, true); // ghost until Create Shape (Staging.pde)
     }
   });
 }
@@ -842,63 +862,11 @@ float chatAxis(PVector p, int axis) {
   return axis == 0 ? p.x : (axis == 1 ? p.y : p.z);
 }
 
-// =====================================================================
-//  LOADED SHAPE / ANIMATION CONTEXT (2026-11-21)
-//  Whenever a saved shape or animation is loaded, BOTH agents get a note
-//  with its saved parameters on their next message, saying the user loaded
-//  it and is working on it now - so "bigger" / "faster" / "softer" refer to it.
-// =====================================================================
-String agentsLoadedNoteDesigner = null;
-String agentsLoadedNoteMotion = null;
-
-// The pending note for one agent (once), or "".
-String agentsTakeLoadedNote(boolean motion) {
-  String n = motion ? agentsLoadedNoteMotion : agentsLoadedNoteDesigner;
-  if (motion) agentsLoadedNoteMotion = null;
-  else agentsLoadedNoteDesigner = null;
-  return n == null ? "" : n;
-}
-
+// Joint bends off straight (degrees) as a list - used by the loaded-file notes (Loaded.pde).
 String agentsTurnsList(float[] internalDeg) {
   StringBuilder sb = new StringBuilder();
   for (int i = 0; i < internalDeg.length; i++) sb.append(i == 0 ? "" : ", ").append(round(internalDeg[i] - 180));
   return "[" + sb + "]";
-}
-
-void agentsNoteLoadedShape(String name, int[] torque, int[] stiffness) {
-  float[] now = new float[MOTOR_COUNT];
-  for (int i = 0; i < MOTOR_COUNT; i++) now[i] = cp5.getController("Motor " + (i + 2)).getValue();
-  String params = "joint bends off straight, degrees, base to tip: " + agentsTurnsList(now)
-    + (torque != null ? "; torque " + motorsTorqueList(torque) : "; torque: unchanged (not saved with it)")
-    + (stiffness != null ? "; stiffness " + motorsTorqueList(stiffness) : "; stiffness: unchanged (not saved with it)");
-  agentsLoadedNoteDesigner = "\n\n[CONTEXT: the user LOADED the saved shape '" + name + "' from the shape library "
-    + "(tuned on the real arm) and it is on the arm now. This is the shape we are working on: follow-ups like "
-    + "'bigger', 'curl the tip more', 'softer' refer to THIS shape. Saved parameters - " + params + ". It has no "
-    + "segment list: to change it, describe the whole shape as segments that reproduce these bends, with the "
-    + "requested change applied.]";
-  agentsLoadedNoteMotion = "\n\n[CONTEXT: the user LOADED the saved shape '" + name + "' and it is on the arm now. "
-    + "This is the shape we are working on: animate THIS shape. Saved parameters - " + params + ".]";
-  agentShapeName = name;
-  agentShapeSegments = null;
-  agentShapeClosed = false;
-  agentShapeTorque = torque;
-  agentShapeStiffness = stiffness;
-}
-
-void agentsNoteLoadedAnimation(String name, AnimRecording rec, JSONObject source) {
-  String summary = rec.summaryForAgents();
-  agentsLoadedNoteMotion = "\n\n[CONTEXT: the user LOADED the saved animation '" + name + "' from the animation "
-    + "library and it is playing now. This is the animation we are working on: follow-ups like 'faster', "
-    + "'bigger swing', 'softer tail' refer to THIS animation. It is a " + nf(rec.durationMs / 1000.0, 1, 1)
-    + " s recording replayed in a loop (" + nf(rec.resetMs / 1000.0, 1, 1) + " s return to the start between "
-    + "loops). Saved parameters - " + summary + "."
-    + (source != null ? " It was originally made from this emit_shape_animation input: " + source.format(-1)
-       + ". To change it, send a COMPLETE new animation based on that input with the requested change applied."
-       : " To change it, send a COMPLETE new animation that reproduces this motion with the requested change applied.")
-    + "]";
-  agentsLoadedNoteDesigner = "\n\n[CONTEXT: the user LOADED the saved animation '" + name + "' and it is playing "
-    + "now (the Motion agent's job). Saved parameters - " + summary + ". If the user asks for a still shape, they "
-    + "probably mean a pose from this animation.]";
 }
 
 // =====================================================================
@@ -921,10 +889,15 @@ String MOTION_SYSTEM_TAIL =
   + "(curve_amount, direction, curve_toward, lengths, scale); for a traveling wave, keep "
   + "the amplitude modest enough that the shape still reads. If there is no shape yet, "
   + "invent a sensible body for the motion.\n"
+  + "- Starting: every NEW animation (yours, or a loaded file) is made READY and starts when "
+  + "the user presses Create Shape - an animation that is already playing keeps playing until "
+  + "then. Changes to the animation that IS playing (the adjust tool) and torque / stiffness "
+  + "changes apply immediately. Stop Animation ends it.\n"
   + "- Every message continues the same session. For follow-ups ('slower', 'bigger "
   + "swing', 'softer tail', 'more like a wave'), start from YOUR MOST RECENT animation in "
   + "this conversation and change only what was asked. Always send the COMPLETE "
-  + "animation.\n"
+  + "animation. EXCEPTION: if a message carries a LOADED ANIMATION / LOADED SHAPE note, "
+  + "that loaded item is the current one and its rules win over this.\n"
   + AGENT_JOINT_SETTINGS_GUIDE
   + "- FOR ANIMATIONS: you control the ANGLES (poses / traveling_wave), joint_torque and "
   + "joint_stiffness together. Both settings apply while the animation plays and the "
@@ -974,6 +947,7 @@ JSONObject motionBuildRequestBody(JSONArray turn) {
     + "half of the feel - see its description.");
   JSONArray tools = new JSONArray();
   tools.append(animTool);
+  if (loadedIs("animation")) tools.append(loadedAnimToolDefinition()); // change the loaded animation in place (Loaded.pde)
   body.setJSONArray("tools", tools);
   body.setJSONObject("tool_choice", chatAutoToolChoice());
 
@@ -986,6 +960,9 @@ JSONObject motionBuildRequestBody(JSONArray turn) {
 
 // The Designer's current shape, as context for the Motion agent.
 String motionShapeContext() {
+  // A loaded animation is the current item: the Designer's earlier shape is not on the arm.
+  if (loadedIs("animation")) return "";
+  if (loadedIs("shape")) return ""; // the LOADED SHAPE note above already describes it
   if (agentShapeSegments != null) {
     return "\n\n[Designer's current shape: '" + agentShapeName + "', closed=" + agentShapeClosed
       + ", segments: " + agentShapeSegments.format(-1)
@@ -994,7 +971,7 @@ String motionShapeContext() {
       + "]";
   }
   if (agentShapeName.length() > 0) {
-    return "\n\n[Designer's current shape: the calibrated preset '" + agentShapeName
+    return "\n\n[Current shape: '" + agentShapeName
       + "' (no segment list available - see the joint angles below).]";
   }
   return "\n\n[No shape has been designed yet.]";
@@ -1015,7 +992,7 @@ void motionRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : motionPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + agentsTakeLoadedNote(true) + motionShapeContext() + angles + chatStateNote()));
+  content.append(chatTextBlock(userText + loadedNoteFor(true) + motionShapeContext() + angles + chatStateNote()));
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 
@@ -1030,6 +1007,14 @@ void motionRunTurn(String userText) {
   if (toolUse == null) {
     chatCommitTo(motionHistory, motionPendingToolResults, turn, null, null);
     chatAdd("motion", plainText.length() > 0 ? plainText : "(no reply)");
+    return;
+  }
+  if (toolUse.getString("name").equals("adjust_loaded_animation")) {
+    final JSONObject adj = toolUse.getJSONObject("input");
+    final String[] res = new String[1];
+    chatRunOnMain(new Runnable() { public void run() { res[0] = loadedApplyAnimAdjust(adj); } });
+    chatCommitTo(motionHistory, motionPendingToolResults, turn, toolUse, res[0]);
+    chatAdd("motion", chatMessageForUser(adj, "Adjusted the loaded animation."));
     return;
   }
   if (!toolUse.getString("name").equals("emit_shape_animation")) {
@@ -1047,10 +1032,10 @@ void motionRunTurn(String userText) {
     return;
   }
   final int[] animTorque = agentsParseTorque(input);
+  loadedClear("the Motion agent made a new animation");
   chatRunOnMain(new Runnable() {
     public void run() {
-      aiStartAnimation(anim);
-      if (animTorque != null) motorsApplyAnimationTorque(animTorque);
+      stageAnimation(anim, animTorque); // a NEW animation waits for Create Shape (Staging.pde)
     }
   });
   if (animTorque != null) chatAdd("status", "Torque during this animation, base to tip: "
@@ -1062,11 +1047,11 @@ void motionRunTurn(String userText) {
       + " joints/cycle, " + round(anim.wavePeriodMs) + " ms/cycle"
     : anim.poses.size() + " poses, " + round(anim.frameDurationMs) + " ms per pose";
   chatCommitTo(motionHistory, motionPendingToolResults, turn, toolUse, "Animation '" + anim.animationName + "' ("
-    + summary + ") is now playing on the arm. Joint stiffness: "
+    + summary + ") is READY - it starts when the user presses Create Shape. Joint stiffness: "
     + (anim.stiffnessGiven ? aiJoinIntArray(anim.jointStiffness) : "unchanged (kept the current levels)")
     + (animTorque != null ? "; joint torque: " + motorsTorqueList(animTorque) : "; joint torque unchanged") + ".");
-  chatAdd("motion", chatMessageForUser(input, "Playing \"" + anim.animationName + "\"."));
-  chatAdd("status", "Playing: " + anim.animationName + " (" + summary + "). Stop Animation ends it.");
+  chatAdd("motion", chatMessageForUser(input, "Here's \"" + anim.animationName + "\"."));
+  chatAdd("status", "Ready: " + anim.animationName + " (" + summary + "). Press Create Shape to start it.");
 }
 
 // =====================================================================
@@ -1252,7 +1237,7 @@ String chatStateNote() {
         + sb + "] (degrees, base to tip, 180 = straight, each joint limited to " + round(180 - AI_MAX_TURN_DEG) + "-" + round(180 + AI_MAX_TURN_DEG) + ")";
     }
   }
-  return "\n\n[Arm right now: " + state + hand + "; " + agentsJointSettingsNote() + ".]";
+  return "\n\n[Arm right now: " + state + hand + "; " + agentsJointSettingsNote() + stagedNoteForAgents() + ".]";
 }
 
 JSONObject chatTextBlock(String text) {

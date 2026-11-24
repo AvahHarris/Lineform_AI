@@ -174,8 +174,30 @@ float[] animRecordingSample(AnimRecording r, int elapsedMs) {
   return out;
 }
 
+// Angles of a recording at `elapsedMs` (looping, with the reset) - no
+// torque / stiffness side effects. Used by the 3D preview (Staging.pde).
+float[] animRecordingAnglesAt(AnimRecording r, int elapsedMs) {
+  int n = r.frames.size();
+  int lastT = r.t.get(n - 1);
+  float e = elapsedMs % (lastT + max(1, r.resetMs));
+  float[] out = new float[MOTOR_COUNT];
+  if (e <= lastT) {
+    int k = 0;
+    while (k < n - 2 && r.t.get(k + 1) < e) k++;
+    float t0 = r.t.get(k), t1 = r.t.get(k + 1);
+    float u = t1 > t0 ? constrain((e - t0) / (t1 - t0), 0, 1) : 0;
+    for (int j = 0; j < MOTOR_COUNT; j++) out[j] = lerp(r.frames.get(k)[j], r.frames.get(k + 1)[j], u);
+  } else {
+    float u = (e - lastT) / (float) max(1, r.resetMs);
+    u = u * u * (3 - 2 * u);
+    for (int j = 0; j < MOTOR_COUNT; j++) out[j] = lerp(r.frames.get(n - 1)[j], r.frames.get(0)[j], u);
+  }
+  for (int j = 0; j < MOTOR_COUNT; j++) out[j] = clampJoint(out[j]);
+  return out;
+}
+
 // Plays a loaded animation file's contents (call on the drawing thread).
-void animLibraryPlay(JSONObject e) {
+void animLibraryPlay(JSONObject e, String fileName) {
   String name = e.getString("name");
   AnimRecording rec = new AnimRecording();
   JSONArray frames = e.hasKey("frames") ? e.getJSONArray("frames") : null;
@@ -201,21 +223,12 @@ void animLibraryPlay(JSONObject e) {
   rec.durationMs = e.hasKey("duration_ms") ? e.getInt("duration_ms") : rec.t.get(rec.t.size() - 1);
   rec.resetMs = e.hasKey("reset_ms") ? e.getInt("reset_ms") : ANIM_REPLAY_RESET_MS;
 
-  AIAnimationResult r = new AIAnimationResult();
-  r.ok = true;
-  r.animationName = name;
-  r.recording = rec;
-  r.source = e.hasKey("source") ? e.getJSONObject("source") : null;
-  r.jointStiffness = rec.stiffness.get(0);
-  r.stiffnessGiven = true;
-
-  aiStartAnimation(r);
-  if (!aiAnimating) return; // e.g. refused in Manipulation mode
-  animRecAppliedFrame = -1;
-  motorsApplyAnimationTorque(rec.torque.get(0)); // remembers the torque from before, restored on Stop
-  agentsNoteLoadedAnimation(name, rec, r.source);
-  chatAdd("motion", "Playing the loaded animation \"" + name + "\" (" + nf(rec.durationMs / 1000.0, 1, 1)
-    + " s recording, looping). Ask me to change it - e.g. \"faster\".");
+  JSONObject source = e.hasKey("source") ? e.getJSONObject("source") : null;
+  if (!animStageRecording(name, rec, source)) return;
+  loadedSetAnimation(name, fileName, rec, source); // the current item for both agents (Loaded.pde)
+  chatAdd("motion", "Loaded the animation \"" + name + "\" (" + nf(rec.durationMs / 1000.0, 1, 1)
+    + " s recording, loops). Press Create Shape to start it."
+    + " Ask me to change it - e.g. \"faster\".");
 }
 
 // ---- JSON helpers (shared with Files.pde) ----
@@ -238,4 +251,38 @@ JSONArray libraryJsonInts(int[] v) {
   JSONArray a = new JSONArray();
   for (int x : v) a.append(x);
   return a;
+}
+
+// A NEW recording (Load Animation): READY until Create Shape (Staging.pde).
+boolean animStageRecording(String name, AnimRecording rec, JSONObject source) {
+  if (manipulationMode) { noticeAdd("status", "Switch to Automation mode to load an animation."); return false; }
+  AIAnimationResult r = new AIAnimationResult();
+  r.ok = true;
+  r.animationName = name;
+  r.recording = rec;
+  r.source = source;
+  r.jointStiffness = rec.stiffness.get(0);
+  r.stiffnessGiven = true;
+  stageAnimation(r, rec.torque.get(0));
+  return true;
+}
+
+// A CHANGE to the loaded animation (adjust_loaded_animation, drawing thread):
+// instant if it is the one playing; if it is still waiting, the waiting one
+// is updated; otherwise (stopped) it waits for Create Shape like a new one.
+// Returns "playing", "waiting" or "ready".
+String animApplyRecordingChange(String name, AnimRecording rec, JSONObject source) {
+  AIAnimationResult r = new AIAnimationResult();
+  r.ok = true;
+  r.animationName = name;
+  r.recording = rec;
+  r.source = source;
+  r.jointStiffness = rec.stiffness.get(0);
+  r.stiffnessGiven = true;
+  boolean playingIt = aiAnimating && aiAnimRecording != null && aiAnimName.equals(name);
+  if (playingIt) { startAnimationNow(r, rec.torque.get(0)); return "playing"; }
+  boolean waitingIt = stagedAnim != null && stagedAnim.animationName.equals(name);
+  if (waitingIt) { stagedAnim = r; stagedAnimTorque = rec.torque.get(0); return "waiting"; }
+  stageAnimation(r, rec.torque.get(0));
+  return "ready";
 }

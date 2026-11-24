@@ -1245,6 +1245,9 @@ void controlEvent(ControlEvent theEvent) {
       if (!motorPowerOn(i)) motorsSetPowerSwitch(i, true);
     }
 
+    // A waiting NEW animation starts here instead of sending the bars; a
+    // waiting loaded shape gets its pose / torque / stiffness first (Staging.pde).
+    if (stagedApplyOnCreateShape()) return;
     aiSendSlidersOverSerial();
 
     println(serialConnected() ? "Shape sent to Arduino" : "Shape applied to 3D simulation (no Arduino connected)");
@@ -1283,6 +1286,8 @@ void controlEvent(ControlEvent theEvent) {
 
   // Reset button
 if (name.equals("Reset")) {
+  loadedClear("Reset"); // a loaded shape / animation is no longer the current item (Loaded.pde)
+  stagedClear();        // and anything waiting for Create Shape is dropped (Staging.pde)
 
   // Halt any running animation first - otherwise the next draw() frame's
   // aiUpdateAnimation() just overwrites everything this button is about to
@@ -1861,13 +1866,6 @@ void aiUseKnownShape(String shapeKey, String originalPrompt) {
   generateShapeAngles();
   applyGeneratedAnglesToSliders();
 
-  // Saved joint settings (entries saved since 2026-11-21); older entries
-  // without them keep the current torque / stiffness.
-  int[] tq = shapeLibraryTorque.get(shapeKey);
-  int[] st = shapeLibraryStiffness.get(shapeKey);
-  if (tq != null) motorsSetTorqueAll(tq);
-  if (st != null) aiApplyStiffnessLevels(st);
-  agentsNoteLoadedShape(shapeKey, tq, st); // both agents get the loaded shape as context (Agents.pde)
 
   println("\"" + originalPrompt + "\" matched the calibrated " + shapeKey
     + " shape - using the tuned preset (no AI call needed). Press Create "
@@ -2113,8 +2111,6 @@ void triggerAIAnimation(String prompt) {
     return;
   }
 
-  aiStopAnimation(); // never leave an old animation silently playing under a new one
-
   JSONObject requestBody = aiBuildAnimationRequestBody(prompt.trim());
   AIAnimationResult result = aiCallAndParseAnimation(requestBody.toString());
   if (!result.ok) {
@@ -2122,7 +2118,7 @@ void triggerAIAnimation(String prompt) {
     return;
   }
 
-  aiStartAnimation(result);
+  stageAnimation(result, agentsParseTorque(result.source)); // plays on Create Shape (Staging.pde)
 }
 
 // Solves (poses) or sets up (traveling wave) an already-parsed animation and
@@ -2164,7 +2160,12 @@ void aiStartAnimation(AIAnimationResult result) {
       + " poses, " + nf(result.frameDurationMs, 1, 0) + "ms/transition) ---");
 
     ArrayList<float[]> poses = new ArrayList<float[]>();
-    for (int i = 0; i < result.poses.size(); i++) {
+    for (int i = 0; i < result.poses.size() && result.solvedPoses != null && i < result.solvedPoses.size(); i++) {
+      poses.add(result.solvedPoses.get(i).clone()); // solved for the preview - exactly what it showed
+      aiAnimPoseNames.add(result.poses.get(i).poseName);
+      aiAnimPoseFits.add(result.solvedFits != null && i < result.solvedFits.size() ? result.solvedFits.get(i) : 0.0);
+    }
+    for (int i = 0; i < result.poses.size() && result.solvedPoses == null; i++) {
       AIAnimationPose pose = result.poses.get(i);
       aiLog("Pose " + (i + 1) + "/" + result.poses.size() + ": '" + pose.poseName + "'");
       aiGenerateFromSegments(pose.segments, pose.closed, result.animationName + " - " + pose.poseName);
@@ -2392,6 +2393,8 @@ class AIAnimationResult {
   boolean stiffnessGiven = false; // false = joint_stiffness omitted: keep the current levels
   JSONObject source = null;                  // the raw emit_shape_animation input (saved with the animation)
   AnimRecording recording = null;            // a saved 3 s recording (AnimLibrary.pde) - replayed as is
+  ArrayList<float[]> solvedPoses = null;     // poses already solved for the preview (Staging.pde) - reused on start
+  ArrayList<Float> solvedFits = null;
 
   // Set when the model chose traveling_wave instead of poses - a motion
   // that's a sine wave propagating along the chain (snake/eel/whip/flag),

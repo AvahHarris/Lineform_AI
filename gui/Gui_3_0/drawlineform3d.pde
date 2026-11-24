@@ -144,6 +144,9 @@ void drawlineform3d() {
   }
   endShape();
 
+  // Waiting item (Staging.pde): translucent green ghost arm, animated.
+  drawStagedPreview();
+
   // AI target curve overlay - the shape Claude proposed, before it was
   // quantized down to 11 rigid-joint bend angles. Purely visual: nothing
   // here is sent to the motors. Lets you compare "what I asked for" (cyan)

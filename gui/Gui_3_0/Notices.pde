@@ -70,9 +70,11 @@ void drawNoticePanel(float topLimit) {
     }
     list.addAll(notices);
   }
+  String ready = stagedReadyMessage(); // Staging.pde - stays until Create Shape / Reset
   String pinned = overloadWarning;
   if (pinned != null) list.add(new Notice("pinned", "!! " + pinned
     + " Check what the arm is pushing against before switching back to Automation mode."));
+  else if (ready != null) { pinned = ready; list.add(new Notice("ready", ready)); }
   if (list.isEmpty()) return;
 
   pushStyle();
@@ -121,15 +123,17 @@ void drawNoticePanel(float topLimit) {
     Notice n = shown.get(k);
     ArrayList<String> lines = wrapped.get(k);
     float bh = lines.size() * lineH + 6;
-    boolean err = !n.kind.equals("status");
+    boolean isReady = n.kind.equals("ready");
+    boolean err = !n.kind.equals("status") && !isReady;
     noStroke();
-    if (n.kind.equals("pinned")) fill(170, 30, 40, 235);
+    if (isReady) fill(30, 120, 70, 235);
+    else if (n.kind.equals("pinned")) fill(170, 30, 40, 235);
     else if (err) fill(120, 30, 40, 200);
     else fill(255, 255, 255, 18);
     rect(uiX(NOTICE_X + pad), uiY(cy), (NOTICE_W - 2 * pad) * uiScale, bh * uiScale, 5 * uiScale);
-    fill(err ? THEME_RED : THEME_MUTED);
+    fill(isReady ? PREVIEW_COLOR : (err ? THEME_RED : THEME_MUTED));
     rect(uiX(NOTICE_X + pad), uiY(cy), 3 * uiScale, bh * uiScale);
-    fill(n.kind.equals("pinned") ? color(255) : (err ? color(255, 205, 205) : THEME_TEXT));
+    fill(n.kind.equals("pinned") || isReady ? color(255) : (err ? color(255, 205, 205) : THEME_TEXT));
     for (int j = 0; j < lines.size(); j++) hudText(lines.get(j), NOTICE_X + pad + 8, cy + 3 + j * lineH);
     cy += bh + gap;
   }

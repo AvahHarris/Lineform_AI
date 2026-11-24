@@ -9,6 +9,9 @@
 //  * Save Animation  -> records 3 s (AnimLibrary.pde), then "Save animation as..."
 //  * Load Animation  -> pick an animation file -> it plays (looping)
 //  Nothing is loaded at startup and typing a name in the chat loads nothing.
+//  Loading only READS a file; changes (bars, agents' adjustments) live in
+//  memory. The GUI writes a file only after the user picks it in a Save
+//  dialog, and the dialog always suggests a NEW file name (name_2.json ...).
 //  The dialogs start in the sketch's shapes/ and animations/ folders, but
 //  files can live anywhere.
 //
@@ -29,7 +32,13 @@ File filesDefault(String dir, String name) {
   if (name == null) return d;
   String safe = name.trim().toLowerCase().replaceAll("[^a-z0-9 _-]", "").replaceAll("\\s+", "_");
   if (safe.length() == 0) safe = "untitled";
-  return new File(d, safe + ".json");
+  // Never suggest a file that already exists (e.g. the file this shape /
+  // animation was loaded from): loaded files are never overwritten by the
+  // GUI. If the user picks an existing file in the dialog themselves, the
+  // system's own "replace?" prompt handles that.
+  File f = new File(d, safe + ".json");
+  for (int n = 2; f.exists(); n++) f = new File(d, safe + "_" + n + ".json");
+  return f;
 }
 
 String filesWithJson(File f) {
@@ -74,7 +83,8 @@ void filesSaveShapeButton() {
   int[] tq = new int[MOTOR_COUNT];
   JSONArray ang = new JSONArray(), small = new JSONArray(), large = new JSONArray();
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    cur[i] = cp5.getController("Motor " + (i + 2)).getValue();
+    // A shape still waiting for Create Shape (the ghost) is what gets saved.
+    cur[i] = stagedShape ? stagedShapeAngles[i] : cp5.getController("Motor " + (i + 2)).getValue();
     float turn = cur[i] - 180;
     ang.append(round(cur[i] * 10) / 10.0);
     small.append(round((180 + turn * AI_SIZE_MIN_SCALE) * 10) / 10.0);
@@ -155,14 +165,16 @@ void filesApplyShape(JSONObject e, String fileName) {
   if (tq != null) shapeLibraryTorque.put(name, tq); else shapeLibraryTorque.remove(name);
   if (st != null) shapeLibraryStiffness.put(name, st); else shapeLibraryStiffness.remove(name);
 
-  aiStopAnimation();
-  // Shape Size 0.5 = exactly the saved pose.
-  Controller ss = cp5.getController("Shape Size");
-  ss.setBroadcast(false);
-  ss.setValue(0.5);
-  ss.setBroadcast(true);
-  aiUseKnownShape(name, fileName); // bars + torque / stiffness + tells both agents
-  noticeAdd("status", "Loaded the shape \"" + name + "\" from " + fileName + ". Press Create Shape to send it to the arm.");
+  // The saved pose = Shape Size 0.5, halfway between small and large.
+  float[] pose = new float[MOTOR_COUNT];
+  for (int i = 0; i < MOTOR_COUNT; i++) pose[i] = clampJoint(lerp(small[i], large[i], 0.5));
+  // A newly loaded file waits for Create Shape: pose, torque and stiffness (Staging.pde).
+  boolean animPlaying = aiAnimating;
+  stageLoadedShape(name, pose, tq, st);
+  loadedSetShape(name, fileName, pose, tq, st); // the current item for both agents (Loaded.pde)
+  noticeAdd("status", "Loaded the shape \"" + name + "\" from " + fileName + ". Press Create Shape to send it"
+    + (tq != null || st != null ? " with its torque / stiffness" : "") + " to the arm"
+    + (animPlaying ? " (the animation keeps playing until then)." : ".") + " The green ghost arm shows it.");
 }
 
 // ---------------- animations ----------------
@@ -201,7 +213,7 @@ void filesAnimLoadSelected(final File f) {
         return;
       }
       if (!e.hasKey("name")) e.setString("name", f.getName().replaceAll("(?i)\\.json$", ""));
-      animLibraryPlay(e);
+      animLibraryPlay(e, f.getName());
     }
   });
 }
