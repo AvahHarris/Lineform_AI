@@ -1,6 +1,8 @@
 # Secrets
 anthropic_key.txt
 **/anthropic_key.txt
+openai_key.txt
+**/openai_key.txt
 
 # Generated each run
 gui/Gui_3_0/logs/ai_debug_log.txt

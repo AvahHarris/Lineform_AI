@@ -62,7 +62,7 @@ java.util.concurrent.ConcurrentLinkedQueue<Runnable> chatMainJobs = new java.uti
 void setupChatPanel() {
   chatInput = cp5.addTextfield("Chat Input")
     .setPosition(CHAT_X + CHAT_PAD, CHAT_Y + CHAT_H - CHAT_PAD - CHAT_INPUT_H)
-    .setSize(round(CHAT_W - 3 * CHAT_PAD - CHAT_SEND_W), round(CHAT_INPUT_H))
+    .setSize(round(CHAT_W - 4 * CHAT_PAD - CHAT_SEND_W - CHAT_MIC_W), round(CHAT_INPUT_H))  // mic button sits between box and Send (Voice.pde)
     .setFont(createFont("Arial", 16))
     .setAutoClear(false)
     .setLabel("");
@@ -104,7 +104,7 @@ void setupChatPanel() {
 // Called from layoutResponsiveGUI() whenever the window size changes.
 void layoutChatPanel() {
   float inputY = CHAT_Y + CHAT_H - CHAT_PAD - CHAT_INPUT_H;
-  positionControl("Chat Input", CHAT_X + CHAT_PAD, inputY, CHAT_W - 3 * CHAT_PAD - CHAT_SEND_W, CHAT_INPUT_H);
+  positionControl("Chat Input", CHAT_X + CHAT_PAD, inputY, CHAT_W - 4 * CHAT_PAD - CHAT_SEND_W - CHAT_MIC_W, CHAT_INPUT_H);
   positionControl("Send", CHAT_X + CHAT_W - CHAT_PAD - CHAT_SEND_W, inputY, CHAT_SEND_W, CHAT_INPUT_H);
   positionControl("New Chat", CHAT_X + CHAT_W - CHAT_PAD - 100, CHAT_Y + 7, 100, 26);
   positionControl("Critic Toggle", CHAT_X + CHAT_W - CHAT_PAD - 100 - 6 - CHAT_CRITIC_W, CHAT_Y + 7, CHAT_CRITIC_W, 26);
@@ -336,7 +336,10 @@ void drawChatPanel() {
 
   // Status line just above the mode switch
   String status = chatStatus;
-  if (chatBusy && status.length() > 0) {
+  drawVoiceButton();
+  if (drawVoiceStatus(CHAT_X + CHAT_PAD + 4, areaBottom + 14)) {
+    // recording / transcribing (Voice.pde) takes the status line
+  } else if (chatBusy && status.length() > 0) {
     int dots = (millis() / 400) % 4;
     String d = "";
     for (int k = 0; k < dots; k++) d += ".";

@@ -8,8 +8,8 @@
 //  * Every message to either agent carries a LOADED note: the first time
 //    with the file's full parameters, after that a short reminder.
 //  * While a shape is loaded, the Designer also gets adjust_loaded_shape;
-//    while an animation is loaded, the Motion agent gets
-//    adjust_loaded_animation. They change the loaded item IN PLACE (bends,
+//    for animations the Motion agent uses adjust_current_animation
+//    (AnimAdjust.pde). They change the loaded item IN PLACE (bends,
 //    speed, swing, torque, stiffness) instead of re-designing it, so
 //    "faster" / "bigger" / "softer" keep everything else exactly as saved.
 // =====================================================================
@@ -70,7 +70,7 @@ String loadedNoteFor(boolean motion) {
   if (motion) c.toldMotion = true; else c.toldDesigner = true;
   boolean mine = motion == c.kind.equals("animation"); // the loaded item is this agent's kind
   String what = c.kind.equals("shape") ? "shape" : "animation";
-  String adjustTool = c.kind.equals("shape") ? "adjust_loaded_shape" : "adjust_loaded_animation";
+  String adjustTool = c.kind.equals("shape") ? "adjust_loaded_shape" : "adjust_current_animation";
 
   String rules;
   if (mine) {
@@ -172,26 +172,6 @@ JSONObject loadedShapeToolDefinition() {
   return tool;
 }
 
-JSONObject loadedAnimToolDefinition() {
-  JSONObject props = new JSONObject();
-  props.setJSONObject("speed_factor", loadedRangeNumber("OPTIONAL. Playback speed: 1.5 = 50% faster, 0.5 = half speed. Leave out to keep the speed.", 0.25, 4.0));
-  props.setJSONObject("amplitude_factor", loadedRangeNumber("OPTIONAL. Size of the swing of every joint around its average angle: >1 = bigger motion, <1 = smaller. Leave out to keep it.", 0.3, 2.0));
-  props.setJSONObject("message_to_user", chatSchemaProp("string", "1-2 short sentences for the user about what you changed."));
-  JSONObject schema = new JSONObject();
-  schema.setString("type", "object");
-  schema.setJSONObject("properties", props);
-  JSONArray req = new JSONArray();
-  req.append("message_to_user");
-  schema.setJSONArray("required", req);
-  JSONObject tool = new JSONObject();
-  tool.setString("name", "adjust_loaded_animation");
-  tool.setString("description", "Change the LOADED animation in place (speed, size of the swing, torque, stiffness), keeping the motion itself exactly as recorded. Use this for any change it can express.");
-  tool.setJSONObject("input_schema", schema);
-  chatAddTorqueField(tool, "OPTIONAL. New torque for each joint for the whole animation, 11 integers 0-100, base to tip (0 = motor off, free-swinging). Leave out to keep the recorded torque.");
-  chatAddStiffnessField(tool, "OPTIONAL. New stiffness level for each joint for the whole animation, 11 integers 0-3, base to tip. Leave out to keep the recorded stiffness.");
-  return tool;
-}
-
 // Applies adjust_loaded_shape (drawing thread). Returns the result text for the agent.
 String loadedApplyShapeAdjust(JSONObject in) {
   LoadedContext c = loaded;
@@ -210,7 +190,17 @@ String loadedApplyShapeAdjust(JSONObject in) {
   for (int i = 0; i < MOTOR_COUNT; i++) ang[i] = clampAI(ang[i]);
   int[] tq = agentsParseTorque(in), st = agentsParseStiffness(in);
 
-  // Still WAITING for its first Create Shape -> update the waiting item (Staging.pde).
+  boolean newBends = in.hasKey("joint_bends") || in.hasKey("bend_scale");
+  // Torque / stiffness only = an adjustment: always to the arm NOW, even while
+  // a shape waits for Create Shape (2026-11-25: adjustments never go to the preview).
+  if (!newBends) {
+    applyJointSettingsNow(tq, st);
+    if (tq != null) agentShapeTorque = tq;
+    if (st != null) agentShapeStiffness = st;
+    return "Applied to the arm immediately:" + (tq != null ? " torque " + motorsTorqueList(tq) : "")
+      + (st != null ? " stiffness " + motorsTorqueList(st) : "") + " (the angles are unchanged).";
+  }
+  // New bends to the loaded shape still WAITING for its first Create Shape -> update the waiting item (Staging.pde).
   if (stagedShapeWaiting(c.name)) {
     stagedUpdateShape(ang, tq, st);
     if (tq != null) { c.torque = tq; agentShapeTorque = tq; }
@@ -227,43 +217,17 @@ String loadedApplyShapeAdjust(JSONObject in) {
   }
   shapeLibrarySmall.put(c.name, small);
   shapeLibraryLarge.put(c.name, large);
-  stageShapePose(c.name, ang, false); // new bends: ghost until Create Shape (Staging.pde)
-  applyJointSettingsNow(tq, st);      // torque / stiffness: instant
+  if (newBends) {
+    stageShapePose(c.name, ang, false); // new bends: ghost until Create Shape (Staging.pde)
+    stageOrApplyJointSettings(tq, st);  // ...and its torque / stiffness wait with it
+  } else {
+    applyJointSettingsNow(tq, st);      // only torque / stiffness for the shape on the arm: instant
+  }
   if (tq != null) { c.torque = tq; agentShapeTorque = tq; }
   if (st != null) { c.stiffness = st; agentShapeStiffness = st; }
   c.angles = ang;
   c.edits++;
   return "Adjusted the loaded shape '" + c.name + "' (still the current shape). Now: " + loadedShortParams(c)
-    + ". The new bends are shown as a ghost preview (the user presses Create Shape to send them); torque / stiffness changes were applied immediately.";
-}
-
-// Applies adjust_loaded_animation (drawing thread). Returns the result text for the agent.
-String loadedApplyAnimAdjust(JSONObject in) {
-  LoadedContext c = loaded;
-  if (c == null || !c.kind.equals("animation") || c.rec == null) return "ERROR: no animation is loaded any more - nothing changed.";
-  AnimRecording o = c.rec, r = new AnimRecording();
-  float speed = in.hasKey("speed_factor") ? constrain(in.getFloat("speed_factor"), 0.25, 4.0) : 1;
-  float amp = in.hasKey("amplitude_factor") ? constrain(in.getFloat("amplitude_factor"), 0.3, 2.0) : 1;
-  int[] tq = agentsParseTorque(in), st = agentsParseStiffness(in);
-  float[] mean = new float[MOTOR_COUNT];
-  for (float[] f : o.frames) for (int j = 0; j < MOTOR_COUNT; j++) mean[j] += f[j] / o.frames.size();
-  for (int k = 0; k < o.frames.size(); k++) {
-    r.t.add(round(o.t.get(k) / speed));
-    float[] f = new float[MOTOR_COUNT];
-    for (int j = 0; j < MOTOR_COUNT; j++) f[j] = clampJoint(mean[j] + (o.frames.get(k)[j] - mean[j]) * amp);
-    r.frames.add(f);
-    r.torque.add(tq != null ? tq.clone() : o.torque.get(k).clone());
-    r.stiffness.add(st != null ? st.clone() : o.stiffness.get(k).clone());
-  }
-  r.durationMs = round(o.durationMs / speed);
-  r.resetMs = max(150, round(o.resetMs / speed));
-  r.intervalMs = max(1, round(o.intervalMs / speed));
-  c.rec = r;
-  c.edits++;
-  String how = animApplyRecordingChange(c.name, r, c.source); // instant if playing (AnimLibrary.pde)
-  return "Adjusted the loaded animation '" + c.name + "' (still the current animation; "
-    + (how.equals("playing") ? "the change is playing now" : "READY - it starts when the user presses Create Shape") + ")"
-    + (speed != 1 ? ", speed x" + nf(speed, 1, 2) : "") + (amp != 1 ? ", swing x" + nf(amp, 1, 2) : "")
-    + (tq != null ? ", torque " + motorsTorqueList(tq) : "") + (st != null ? ", stiffness " + motorsTorqueList(st) : "")
-    + ". Now: " + loadedShortParams(c) + ".";
+    + (newBends ? ". The new bends (with any torque / stiffness change) are shown as a ghost preview; they go to the arm when the user presses Create Shape."
+                : ". Torque / stiffness changes were applied to the arm immediately.");
 }

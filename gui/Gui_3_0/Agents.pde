@@ -45,6 +45,10 @@ boolean agentShapeClosed = false;
 JSONArray agentShapeSegments = null;   // null = none yet, or a calibrated preset
 int[] agentShapeTorque = null;         // the Designer's torque plan for the shape (null = none)
 int[] agentShapeStiffness = null;      // the Designer's stiffness plan for the shape (null = none)
+ChatShapeTry chatLastSolved = null;    // the shape aiGenerateFromSegments solved last (chatTryShape)
+// Designs requested in parallel per Shape-mode message (2 = best of 2, 1 = off).
+// "designer_candidates" in local_config.json.
+int DESIGNER_CANDIDATES = 2;
 
 void agentsResetMemory() {
   chatHistory = new JSONArray();
@@ -53,6 +57,28 @@ void agentsResetMemory() {
   motionHistory = new JSONArray();
   motionPendingToolResults.clear();
   // the shape stays on the arm, so the Motion agent can still use it
+  // (2026-11-25) A loaded file's FULL parameters must be sent again: the
+  // agents no longer have the message that carried them.
+  if (loaded != null) { loaded.toldDesigner = false; loaded.toldMotion = false; }
+}
+
+// (2026-11-25) First message of a NEW chat: the agent has no memory of what is
+// on the arm, so it gets the current shape / animation's own description.
+String agentsNewChatContext(boolean motion) {
+  if (!motion) {
+    if (chatHistory.size() > 0 || loadedIs("shape") || agentShapeSegments == null) return "";
+    return "\n\n[CONTEXT (new chat): the shape on the arm is the earlier design '" + agentShapeName + "', closed="
+      + agentShapeClosed + ", segments: " + agentShapeSegments.format(-1)
+      + (agentShapeTorque != null ? "; torque " + motorsTorqueList(agentShapeTorque) : "")
+      + (agentShapeStiffness != null ? "; stiffness " + motorsTorqueList(agentShapeStiffness) : "")
+      + ". Follow-ups like 'bigger' or 'softer' refer to it: start from these segments.]";
+  }
+  if (motionHistory.size() > 0 || loadedIs("animation")) return "";
+  AIAnimationResult a = stagedAnim != null ? stagedAnim : (aiAnimating ? aiLastAnimation : null);
+  if (a == null || a.source == null) return "";
+  return "\n\n[CONTEXT (new chat): the current animation is the earlier '" + a.animationName + "' ("
+    + (stagedAnim != null ? "waiting for Create Shape" : "playing") + "), made from this emit_shape_animation input: "
+    + a.source.format(-1) + ". Follow-ups like 'faster' refer to it.]";
 }
 
 // =====================================================================
@@ -82,7 +108,7 @@ String AGENT_JOINT_SETTINGS_GUIDE =
   + "a bit. EVEN THE SOFTEST LEVEL (3) KEEPS THE MOTOR ON: the joint is still a spring "
   + "that pulls back to its angle, it never hangs or swings freely.\n"
   + "  * TORQUE 0 IS THE ONLY WAY TO GET A FREE HINGE. At torque 0 the motor is switched "
-  + "OFF: no fight-back at all, the joint holds no angle and simply flops, hangs and "
+  + "OFF (its ON/OFF switch in the GUI flips to OFF; any torque above 0 flips it back ON): no fight-back at all, the joint holds no angle and simply flops, hangs and "
   + "swings with gravity and the motion around it (its angle in your shape is then only a "
   + "starting guess). Any joint that should be a loose CHAIN, rope link, flail or pivot "
   + "that swings freely MUST be torque 0 - low torque or very soft stiffness would make it "
@@ -98,7 +124,12 @@ String AGENT_JOINT_SETTINGS_GUIDE =
   + "choice for parts that should look or feel loose.\n"
   + "  * The arm-state note at the end of each user message lists every joint's current "
   + "torque and stiffness level (base to tip). The user can change them with "
-  + "the TORQUE / STIFF bars at any time, so read them each turn.\n";
+  + "the TORQUE / STIFF bars at any time, so read them each turn.\n"
+  + "  * Joints the user SWITCHED OFF (listed in the arm-state note) are limp on purpose. "
+  + "Whenever you send joint_torque, give them 0 so they stay OFF - UNLESS the request "
+  + "needs them held (the user asks for it, or the new shape / motion can't work with them "
+  + "limp). Then give them torque above 0: that switches them back ON when the item starts, "
+  + "and say so in message_to_user.\n";
 
 String DESIGNER_SYSTEM_HEAD =
   "You are the DESIGNER agent inside a chat panel that drives a physical "
@@ -122,7 +153,8 @@ String DESIGNER_SYSTEM_TAIL =
   + "if a message carries a LOADED SHAPE / LOADED ANIMATION note, that loaded item is the "
   + "current one and its rules win over this.\n"
   + "- Your shape is shown as a ghost preview in the 3D view; the user presses Create Shape "
-  + "to send it to the arm. Your torque / stiffness are applied to the motors immediately.\n"
+  + "to send it to the arm, together with your torque / stiffness. Until then the motors keep "
+  + "their current settings.\n"
   + "- Each tool result tells you what is now on the arm and how well it fit "
   + "(fit quality: lower is better, under 0.70 is good). Each user message ends "
   + "with a bracketed note about the arm's current state; use it, but don't "
@@ -139,8 +171,10 @@ String DESIGNER_SYSTEM_TAIL =
   + "or flag end that should give but come back can be softer (level 2-3); a "
   + "tool, frame or polygon stays at 100 / level 0 so its corners hold exactly. When the "
   + "user asks to make the shape (or part of it) firmer, softer, stronger, weaker, looser, "
-  + "floppier, more rigid, etc., change joint_torque / joint_stiffness - you can do that "
-  + "WITHOUT changing the angles by resending the same segments. The MOTION agent "
+  + "floppier, more rigid, limp, etc. WITHOUT any change to the angles, use the "
+  + "set_joint_settings tool: it changes only torque / stiffness and applies IMMEDIATELY to "
+  + "the shape on the arm now (a shape still waiting for Create Shape keeps its own settings). Do NOT resend segments just to change torque / stiffness. Use joint_torque / "
+  + "joint_stiffness inside emit_shape_segments only together with a new shape. The MOTION agent "
   + "receives your torque and stiffness plans with the shape and builds animations "
   + "around them. Leave a field out to keep the current values for it.\n"
   + "- You may think briefly before a tool call, but the user does NOT see that "
@@ -179,6 +213,7 @@ JSONObject designerBuildRequestBody(JSONArray turn) {
   JSONArray tools = new JSONArray();
   tools.append(shapeTool);
   if (loadedIs("shape")) tools.append(loadedShapeToolDefinition()); // change the loaded shape in place (Loaded.pde)
+  tools.append(designerSettingsToolDefinition()); // torque / stiffness only - instant (below)
   body.setJSONArray("tools", tools);
   body.setJSONObject("tool_choice", chatAutoToolChoice());
 
@@ -205,11 +240,21 @@ void designerRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : chatPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + loadedNoteFor(false) + chatStateNote())); // loaded file: Loaded.pde
+  content.append(chatTextBlock(userText + agentsNewChatContext(false) + loadedNoteFor(false) + chatStateNote())); // loaded file: Loaded.pde
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 
-  JSONObject resp = agentCall(designerBuildRequestBody(turn), "Designer");
+  // BEST OF N (2026-11-25): DESIGNER_CANDIDATES requests for the same message
+  // run IN PARALLEL; if both are new shapes, both are fitted (and judged by
+  // the Visual Critic in parallel) and the better one is kept.
+  JSONObject resp, respB = null;
+  if (DESIGNER_CANDIDATES >= 2) {
+    JSONObject[] rs = agentCallPair(designerBuildRequestBody(turn), designerBuildRequestBody(turn), "Designer");
+    resp = rs[0] != null ? rs[0] : rs[1];
+    respB = rs[0] != null ? rs[1] : null;
+  } else {
+    resp = agentCall(designerBuildRequestBody(turn), "Designer");
+  }
   if (resp == null) return;
   turn.append(chatMessage("assistant", resp.getJSONArray("content")));
 
@@ -224,6 +269,15 @@ void designerRunTurn(String userText) {
     return;
   }
   JSONObject input = toolUse.getJSONObject("input");
+  if (toolUse.getString("name").equals("set_joint_settings")) {
+    final JSONObject adj = input;
+    final String[] res = new String[1];
+    chatRunOnMain(new Runnable() { public void run() { res[0] = designerApplySettings(adj); } });
+    chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, res[0]);
+    chatAdd("claude", chatMessageForUser(input, "Changed the torque / stiffness."));
+    chatAdd("status", res[0].startsWith("ERROR") ? res[0] : res[0].replaceAll(" \\(.*$", "") + ".");
+    return;
+  }
   if (toolUse.getString("name").equals("adjust_loaded_shape")) {
     final JSONObject adj = input;
     final String[] res = new String[1];
@@ -263,6 +317,40 @@ void designerRunTurn(String userText) {
   }
 
   ChatShapeTry first = chatTryShape(toolUse, 0);
+  JSONObject toolUseB = respB != null ? chatFindToolUse(respB) : null;
+  if (toolUseB != null && toolUseB.getString("name").equals("emit_shape_segments")) {
+    ChatShapeTry candB = chatTryShape(toolUseB, 0);
+    if (candB != null) {
+      if (first == null) {
+        first = candB;
+        turn.setJSONObject(turn.size() - 1, chatMessage("assistant", respB.getJSONArray("content")));
+        toolUse = toolUseB;
+      } else {
+        if (chatCriticOn) { // judge both at the same time
+          chatStatus = "Critic is comparing two designs";
+          ChatCritique[] cs = criticPair(first, candB);
+          first.critique = cs[0];
+          candB.critique = cs[1];
+        }
+        boolean bWins = chatBetter(candB, first);
+        aiLog("[designer] best of 2: A '" + first.name + "' fit " + nf(first.quality, 1, 2)
+          + (first.critique != null ? " critic " + first.critique.score : "") + " vs B '" + candB.name + "' fit "
+          + nf(candB.quality, 1, 2) + (candB.critique != null ? " critic " + candB.critique.score : "")
+          + " -> " + (bWins ? "B" : "A"));
+        chatAdd("status", "Best of 2: kept " + (bWins ? "the second" : "the first") + " design (fit "
+          + nf((bWins ? candB : first).quality, 1, 2) + " vs " + nf((bWins ? first : candB).quality, 1, 2)
+          + (first.critique != null && candB.critique != null
+             ? ", critic " + (bWins ? candB : first).critique.score + "/10 vs " + (bWins ? first : candB).critique.score + "/10" : "")
+          + ").");
+        if (bWins) {
+          first = candB;
+          // the conversation keeps the reply that was actually used
+          turn.setJSONObject(turn.size() - 1, chatMessage("assistant", respB.getJSONArray("content")));
+          toolUse = toolUseB;
+        }
+      }
+    }
+  }
   if (first == null) {
     chatCommitTo(chatHistory, chatPendingToolResults, turn, toolUse, "ERROR: no usable segments - nothing changed on the arm.");
     chatAdd("error", "The Designer's shape had no usable segments - try rephrasing.");
@@ -274,7 +362,7 @@ void designerRunTurn(String userText) {
 
   if (chatCriticOn) {
     // ---- Critic review, then at most one revision ----
-    first.critique = criticReview(first);
+    if (first.critique == null) first.critique = criticReview(first); // best of 2 already judged it
     chatShowCritique(first.critique);
     boolean criticUnhappy = first.critique != null && (!first.critique.recognizable || first.critique.score < CRITIC_PASS_SCORE);
     boolean fitPoor = first.quality > AI_REFINE_QUALITY_THRESHOLD;
@@ -325,22 +413,23 @@ void designerRunTurn(String userText) {
   if (torquePlan != null) {
     chatRunOnMain(new Runnable() {
       public void run() {
-        applyJointSettingsNow(torquePlan, null); // instant (Staging.pde)
+        stageOrApplyJointSettings(torquePlan, null); // goes with the waiting shape (Staging.pde)
       }
     });
     chatAdd("status", (sr != null && sr.changed ? "Torque (after the Settings Critic)" : "Designer set torque")
-      + ", base to tip: " + motorsTorqueList(torquePlan) + " (0 = limp).");
+      + ", base to tip: " + motorsTorqueList(torquePlan) + " (0 = limp) - applied with the shape on Create Shape."
+      + (motorsSwitchedOnBy(torquePlan).length() > 0 ? " This switches motors " + motorsSwitchedOnBy(torquePlan) + " back ON." : ""));
   }
   final int[] stiffPlan = designerStiff;
   agentShapeStiffness = stiffPlan;
   if (stiffPlan != null) {
     chatRunOnMain(new Runnable() {
       public void run() {
-        applyJointSettingsNow(null, stiffPlan); // instant (Staging.pde)
+        stageOrApplyJointSettings(null, stiffPlan); // goes with the waiting shape (Staging.pde)
       }
     });
     chatAdd("status", (sr != null && sr.changed ? "Stiffness (after the Settings Critic)" : "Designer set stiffness")
-      + ", base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft).");
+      + ", base to tip: " + motorsTorqueList(stiffPlan) + " (0 = full ... 3 = very soft) - applied with the shape on Create Shape.");
   }
 
   String owed = "Fitted - shown to the user as a ghost preview; it goes to the arm when they press Create Shape. Fit quality " + nf(best.quality, 1, 2)
@@ -432,6 +521,7 @@ ChatShapeTry chatTryShape(JSONObject toolUse, final int attempt) {
       arrayCopy(generatedAngles, t.angles);
       t.curved = aiShapeIsCurved;
       aiRecordFitHistory(t.name, attempt, t.quality);
+      chatLastSolved = t;
       } });
     }
   });
@@ -443,7 +533,10 @@ ChatShapeTry chatTryShape(JSONObject toolUse, final int attempt) {
 void chatApplyBest(final ChatShapeTry best, ChatShapeTry lastFitted) {
   chatRunOnMain(new Runnable() {
     public void run() {
-      if (best != lastFitted) stagedWithBarsKept(new Runnable() { public void run() {
+      // Re-solve unless the best one was the LAST shape fitted (its preview /
+      // Shape Size state is then still current). With best of 2 that is not
+      // always the one passed in as lastFitted.
+      if (best != chatLastSolved) stagedWithBarsKept(new Runnable() { public void run() {
         aiAnchorAtCenter = best.centered;
         aiGenerateFromSegments(aiCloneSegments(best.segments), best.closed, best.name);
         aiAnchorAtCenter = false;
@@ -672,7 +765,7 @@ class ChatSettingsReview {
     if (!changed) return "SETTINGS CRITIC: kept your torque / stiffness (" + reasoning + ").";
     return "SETTINGS CRITIC (reviews only torque / stiffness for the object's features) changed them to "
       + "torque " + motorsTorqueList(torque) + ", stiffness " + motorsTorqueList(stiffness)
-      + " - reason: " + reasoning + ". These are on the arm now; build on them in later replies "
+      + " - reason: " + reasoning + ". They go to the arm with the shape when the user presses Create Shape; build on them in later replies "
       + "unless the user asks otherwise.";
   }
 }
@@ -710,7 +803,8 @@ JSONObject settingsCriticToolDefinition() {
 ChatSettingsReview settingsReview(ChatShapeTry t, int[] designerTorque, int[] designerStiff) {
   chatStatus = "Settings Critic is checking torque / stiffness";
   try {
-    int[] curT = designerTorque != null ? designerTorque : motorTorquePct.clone();
+    // Current torque as the motors really are: a row switched OFF is 0 (its bar keeps its old value).
+    int[] curT = designerTorque != null ? designerTorque : motorsEffectiveTorque();
     int[] curS = designerStiff != null ? designerStiff : hingeStiffnessLevel.clone();
     StringBuilder asked = new StringBuilder();
     int from = max(0, designerRequests.size() - 4);
@@ -728,6 +822,7 @@ ChatSettingsReview settingsReview(ChatShapeTry t, int[] designerTorque, int[] de
       + "\nResulting bend of each joint off straight, degrees, base to tip (joint 1 = motor 2): [" + ang + "]"
       + "\nTorque the Designer " + (designerTorque != null ? "chose" : "left as it was") + ": " + motorsTorqueList(curT)
       + "\nStiffness the Designer " + (designerStiff != null ? "chose" : "left as it was") + ": " + motorsTorqueList(curS)
+      + motorsUserOffNote()
       + "\nReview torque and stiffness for this object.";
     JSONArray content = new JSONArray();
     content.append(chatTextBlock(text));
@@ -889,6 +984,12 @@ String MOTION_SYSTEM_TAIL =
   + "(curve_amount, direction, curve_toward, lengths, scale); for a traveling wave, keep "
   + "the amplitude modest enough that the shape still reads. If there is no shape yet, "
   + "invent a sensible body for the motion.\n"
+  + "- CHANGES vs NEW: for 'faster', 'slower', 'bigger', 'smaller', 'softer', 'firmer', 'limp "
+  + "tail', 'stronger' and the like, use adjust_current_animation - it changes the playing "
+  + "animation IMMEDIATELY (no new preview), even if a new one is waiting; only if nothing is "
+  + "playing does it change the waiting one. Only make a "
+  + "NEW animation (emit_shape_animation) when the motion itself must change (a different "
+  + "movement, a different shape, a different kind of motion).\n"
   + "- Starting: every NEW animation (yours, or a loaded file) is made READY and starts when "
   + "the user presses Create Shape - an animation that is already playing keeps playing until "
   + "then. Changes to the animation that IS playing (the adjust tool) and torque / stiffness "
@@ -947,7 +1048,7 @@ JSONObject motionBuildRequestBody(JSONArray turn) {
     + "half of the feel - see its description.");
   JSONArray tools = new JSONArray();
   tools.append(animTool);
-  if (loadedIs("animation")) tools.append(loadedAnimToolDefinition()); // change the loaded animation in place (Loaded.pde)
+  if (animAdjustAvailable()) tools.append(animAdjustToolDefinition()); // change the playing / waiting animation in place (AnimAdjust.pde)
   body.setJSONArray("tools", tools);
   body.setJSONObject("tool_choice", chatAutoToolChoice());
 
@@ -992,7 +1093,7 @@ void motionRunTurn(String userText) {
 
   JSONArray content = new JSONArray();
   for (JSONObject tr : motionPendingToolResults) content.append(tr);
-  content.append(chatTextBlock(userText + loadedNoteFor(true) + motionShapeContext() + angles + chatStateNote()));
+  content.append(chatTextBlock(userText + agentsNewChatContext(true) + loadedNoteFor(true) + motionShapeContext() + angles + chatStateNote()));
   JSONArray turn = new JSONArray();
   turn.append(chatMessage("user", content));
 
@@ -1009,12 +1110,13 @@ void motionRunTurn(String userText) {
     chatAdd("motion", plainText.length() > 0 ? plainText : "(no reply)");
     return;
   }
-  if (toolUse.getString("name").equals("adjust_loaded_animation")) {
+  if (toolUse.getString("name").equals("adjust_current_animation")) {
     final JSONObject adj = toolUse.getJSONObject("input");
     final String[] res = new String[1];
-    chatRunOnMain(new Runnable() { public void run() { res[0] = loadedApplyAnimAdjust(adj); } });
+    chatRunOnMain(new Runnable() { public void run() { res[0] = animApplyAdjust(adj); } });
     chatCommitTo(motionHistory, motionPendingToolResults, turn, toolUse, res[0]);
-    chatAdd("motion", chatMessageForUser(adj, "Adjusted the loaded animation."));
+    chatAdd("motion", chatMessageForUser(adj, "Adjusted the animation."));
+    chatAdd("status", res[0].startsWith("ERROR") ? res[0] : res[0].replaceAll("\\. The motion itself.*$", "") + ".");
     return;
   }
   if (!toolUse.getString("name").equals("emit_shape_animation")) {
@@ -1039,7 +1141,8 @@ void motionRunTurn(String userText) {
     }
   });
   if (animTorque != null) chatAdd("status", "Torque during this animation, base to tip: "
-    + motorsTorqueList(animTorque) + " (0 = limp; restored when it stops).");
+    + motorsTorqueList(animTorque) + " (0 = limp; restored when it stops)."
+    + (motorsSwitchedOnBy(animTorque).length() > 0 ? " Switches motors " + motorsSwitchedOnBy(animTorque) + " back ON while it plays." : ""));
   if (anim.stiffnessGiven) chatAdd("status", "Stiffness during this animation, base to tip: "
     + motorsTorqueList(anim.jointStiffness) + " (0 = full ... 3 = very soft; restored when it stops).");
   String summary = anim.isTravelingWave
@@ -1057,6 +1160,26 @@ void motionRunTurn(String userText) {
 // =====================================================================
 //  Shared plumbing
 // =====================================================================
+
+// Two requests at the same time (best of 2); either result may be null.
+JSONObject[] agentCallPair(final JSONObject bodyA, final JSONObject bodyB, final String who) {
+  final JSONObject[] out = new JSONObject[2];
+  Thread tb = new Thread(new Runnable() { public void run() { out[1] = agentCall(bodyB, who + " (2nd design)"); } });
+  tb.start();
+  out[0] = agentCall(bodyA, who);
+  try { tb.join(); } catch (InterruptedException e) { }
+  return out;
+}
+
+// The Visual Critic on two designs at the same time.
+ChatCritique[] criticPair(final ChatShapeTry a, final ChatShapeTry b) {
+  final ChatCritique[] out = new ChatCritique[2];
+  Thread tb = new Thread(new Runnable() { public void run() { out[1] = criticReview(b); } });
+  tb.start();
+  out[0] = criticReview(a);
+  try { tb.join(); } catch (InterruptedException e) { }
+  return out;
+}
 
 // Sends a request; returns the parsed reply, or null after showing the
 // problem in the chat.
@@ -1100,6 +1223,48 @@ void chatAddTorqueField(JSONObject tool, String description) {
   tool.getJSONObject("input_schema").getJSONObject("properties").setJSONObject("joint_torque", prop);
 }
 
+// ---- Designer: torque / stiffness only (2026-11-25) ----
+// set_joint_settings changes ONLY torque / stiffness, never the angles. It is
+// always applied to the motors at once, to the shape on the arm now - even
+// while a new shape waits for Create Shape (that one keeps its own settings).
+JSONObject designerSettingsToolDefinition() {
+  JSONObject props = new JSONObject();
+  props.setJSONObject("message_to_user", chatSchemaProp("string", "1-2 short sentences for the user about what you changed."));
+  JSONObject schema = new JSONObject();
+  schema.setString("type", "object");
+  schema.setJSONObject("properties", props);
+  JSONArray req = new JSONArray();
+  req.append("message_to_user");
+  schema.setJSONArray("required", req);
+  JSONObject tool = new JSONObject();
+  tool.setString("name", "set_joint_settings");
+  tool.setString("description", "Change ONLY the torque and/or stiffness of the joints - no change to the shape or its "
+    + "angles. Applies immediately to the shape on the arm now (never to a shape waiting for Create Shape). Use this "
+    + "for requests like 'softer', 'firmer', 'make the chain limp', 'stronger base'.");
+  tool.setJSONObject("input_schema", schema);
+  chatAddTorqueField(tool, "OPTIONAL. New torque for each joint, 11 integers 0-100, base to tip (0 = motor off, a free hinge). Leave out to keep the torque.");
+  chatAddStiffnessField(tool, "OPTIONAL. New stiffness level for each joint, 11 integers 0-3, base to tip. Leave out to keep the stiffness.");
+  return tool;
+}
+
+// Applies set_joint_settings (drawing thread). Returns the result text for the agent.
+String designerApplySettings(JSONObject in) {
+  int[] tq = agentsParseTorque(in), st = agentsParseStiffness(in);
+  if (tq == null && st == null) return "ERROR: no joint_torque or joint_stiffness given - nothing changed.";
+  boolean waiting = false; // adjustments always go to the CURRENT shape on the arm, instantly (a waiting ghost keeps its own settings)
+  applyJointSettingsNow(tq, st);
+  if (tq != null) agentShapeTorque = tq;
+  if (st != null) agentShapeStiffness = st;
+  if (loaded != null && loaded.kind.equals("shape")) {
+    if (tq != null) loaded.torque = tq;
+    if (st != null) loaded.stiffness = st;
+    loaded.edits++;
+  }
+  return (waiting ? "Updated the WAITING shape's" : "Applied to the arm immediately:")
+    + (tq != null ? " torque " + motorsTorqueList(tq) : "") + (st != null ? " stiffness " + motorsTorqueList(st) : "")
+    + (waiting ? " (they go to the arm with it when the user presses Create Shape)" : " (the angles are unchanged)");
+}
+
 // Adds the optional joint_stiffness field (11 x level 0..NUM_STIFFNESS_LEVELS-1).
 void chatAddStiffnessField(JSONObject tool, String description) {
   JSONObject item = new JSONObject();
@@ -1116,16 +1281,26 @@ void chatAddStiffnessField(JSONObject tool, String description) {
 }
 
 // joint_stiffness from a tool call, or null if absent / not exactly 11 values.
+// (2026-11-25 fix) A joint list that isn't exactly 11 numbers used to be dropped silently.
+void agentsBadJointList(String what, int n) {
+  String msg = "An agent sent a " + what + " list with " + (n < 0 ? "unreadable values" : n + " values")
+    + " instead of " + MOTOR_COUNT + " - that " + what + " change was ignored.";
+  noticeAdd("error", msg);
+  aiLog("[agents] " + msg);
+}
+
 int[] agentsParseStiffness(JSONObject input) {
   if (input == null || !input.hasKey("joint_stiffness")) return null;
   try {
     JSONArray a = input.getJSONArray("joint_stiffness");
-    if (a == null || a.size() != MOTOR_COUNT) return null;
+    if (a == null) return null;
+    if (a.size() != MOTOR_COUNT) { agentsBadJointList("stiffness", a.size()); return null; }
     int[] out = new int[MOTOR_COUNT];
     for (int i = 0; i < MOTOR_COUNT; i++) out[i] = constrain(round(a.getFloat(i)), 0, NUM_STIFFNESS_LEVELS - 1);
     return out;
   }
   catch (Exception e) {
+    agentsBadJointList("stiffness", -1);
     return null;
   }
 }
@@ -1145,7 +1320,7 @@ String agentsJointSettingsNote() {
   return "joint settings, base to tip (joint 1 = motor labelled " + displayId(2) + " ... joint 11 = motor "
     + displayId(MOTOR_COUNT + 1) + "): TORQUE % [" + tq + "] (0 = limp)"
     + ", STIFFNESS level [" + st + "] (0 = full ... 3 = very soft)"
-    + (off.length() == 0 ? "" : "; switched OFF by the user (limp, leave them limp): " + off);
+    + (off.length() == 0 ? "" : "; switched OFF by the user (keep them at torque 0 unless the request needs them ON): " + off);
 }
 
 // joint_torque from a tool call, or null if absent / not exactly 11 values.
@@ -1153,12 +1328,14 @@ int[] agentsParseTorque(JSONObject input) {
   if (input == null || !input.hasKey("joint_torque")) return null;
   try {
     JSONArray a = input.getJSONArray("joint_torque");
-    if (a == null || a.size() != MOTOR_COUNT) return null;
+    if (a == null) return null;
+    if (a.size() != MOTOR_COUNT) { agentsBadJointList("torque", a.size()); return null; }
     int[] out = new int[MOTOR_COUNT];
     for (int i = 0; i < MOTOR_COUNT; i++) out[i] = constrain(round(a.getFloat(i)), 0, 100);
     return out;
   }
   catch (Exception e) {
+    agentsBadJointList("torque", -1);
     return null;
   }
 }

@@ -17,3 +17,5 @@
 ## Setup
 
 Put your Anthropic API key in `gui/Gui_3_0/anthropic_key.txt`. This file is git-ignored; never commit it.
+
+Voice input (mic button beside Send) uses OpenAI's speech-to-text, because Claude's API has no speech-to-text. Put an OpenAI API key in `gui/Gui_3_0/openai_key.txt` (also git-ignored), or set `OPENAI_API_KEY`.

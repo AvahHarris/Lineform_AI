@@ -11,5 +11,8 @@
   "load_colors_3d": true,
   "load_color_gain": 1,
   "agent_temperature": -1,
-  "settings_critic": true
+  "settings_critic": true,
+  "designer_candidates": 2,
+  "voice_model": "gpt-4o-mini-transcribe",
+  "voice_language": "en"
 }

@@ -103,6 +103,7 @@ void loadLocalConfig() {
     if (c.hasKey("load_colors_3d")) LOAD_COLORS_3D = c.getBoolean("load_colors_3d");
     if (c.hasKey("agent_temperature")) AGENT_TEMPERATURE = min(1, c.getFloat("agent_temperature"));
     if (c.hasKey("settings_critic")) SETTINGS_CRITIC_ON = c.getBoolean("settings_critic");
+    if (c.hasKey("designer_candidates")) DESIGNER_CANDIDATES = constrain(c.getInt("designer_candidates"), 1, 2);
     if (c.hasKey("load_color_gain")) LOAD_COLOR_GAIN = constrain(c.getFloat("load_color_gain"), 1, LOAD_GAIN_MAX);
     if (c.hasKey("overload_confirm_readings")) OVERLOAD_CONFIRM_READINGS = max(1, c.getInt("overload_confirm_readings"));
     println("local_config.json: " + ACTIVE_MOTORS + " active motors, base block "
@@ -992,6 +993,7 @@ void setup() {
   // Shape Chat panel on the right (see Chat.pde) - the one place to ask
   // Claude for shapes and animations and keep refining them.
   setupChatPanel();
+  setupVoice();
 
   layoutResponsiveGUI();
   applyTheme();
@@ -1003,6 +1005,7 @@ void draw() {
   // Shape/animation results from the chat's background thread are applied
   // here, on the drawing thread, so they never change the arm mid-frame.
   chatRunMainJobs();
+  voiceTick();
   motorsTick();
   background(THEME_BG);
 
@@ -1012,6 +1015,7 @@ void draw() {
   cam.setActive(!cp5.isMouseOver() && !chatMouseOver() && !modesMouseOver() && !motorsViewMouseOver() && !noticeMouseOver() && !loadPanelMouseOver());
 
   motorsSyncStiffnessSliders(); // stiffness bars follow levels changed elsewhere (Motors.pde)
+  motorsSyncRowColors();        // green = ON, red = OFF on the switches and row captions (Motors.pde)
 
   // Advance the ANIMATE player (if one is running) BEFORE drawlineform3d()
   // reads the Motor sliders - so the 3D view this exact frame already
@@ -1062,7 +1066,7 @@ void draw() {
       continue;
     }
     boolean on = motorPowerOn(i);
-    fill(on ? THEME_TEXT : THEME_ORANGE);
+    fill(motorsRowStateColor(i));
     hudText(on ? "ON" : "OFF", POWER_X + POWER_W + 8, labelY);
   }
 
@@ -1089,9 +1093,10 @@ void draw() {
 // Clicks on the hand-drawn controls (ControlP5 handles its own).
 // The load-color GAIN slider is drawn by hand (drawlineform3d.pde).
 void mouseDragged() { loadGainMouseDragged(); }
-void mouseReleased() { loadGainMouseReleased(); }
+void mouseReleased() { voiceMouseReleased(); loadGainMouseReleased(); }
 
 void mousePressed() {
+  if (voiceMousePressed()) return;      // hold-to-talk mic button (Voice.pde)
   if (modesMousePressed()) return;      // Automation / Manipulation switch (Modes.pde)
   if (noticeMousePressed()) return;
   if (loadSwitchMousePressed()) return; // LOAD COLORS on/off (drawlineform3d.pde)     // click the warnings panel = clear it (Notices.pde)
@@ -1241,13 +1246,23 @@ void controlEvent(ControlEvent theEvent) {
     //
     // Motors switched OFF are turned back ON first, holding wherever they
     // were posed by hand (same as the backup GUI's Create Shape).
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-      if (!motorPowerOn(i)) motorsSetPowerSwitch(i, true);
+    // (Rows at 0% torque stay OFF: 0% = OFF since 2026-11-25 - e.g. an
+    // agent's limp chain joints. Before, they were switched ON at 0% -
+    // shown green but limp.)
+    // A waiting item that plans torque 0 for a row keeps it OFF (no brief
+    // switch-on before its plan is applied).
+    int[] startPlan = stagedStartTorque();
+    if (stagedAnim != null) {
+      // A waiting NEW animation: switch the hand-OFF rows ON first (so Stop
+      // later returns to that state), then start it instead of sending the bars.
+      createShapeSwitchOn(startPlan);
+      stagedApplyOnCreateShape();
+      return;
     }
-
-    // A waiting NEW animation starts here instead of sending the bars; a
-    // waiting loaded shape gets its pose / torque / stiffness first (Staging.pde).
-    if (stagedApplyOnCreateShape()) return;
+    // A waiting shape: its pose / torque / stiffness first (this also stops a
+    // playing animation and restores its torque), THEN the hand-OFF rows ON.
+    stagedApplyOnCreateShape();
+    createShapeSwitchOn(startPlan);
     aiSendSlidersOverSerial();
 
     println(serialConnected() ? "Shape sent to Arduino" : "Shape applied to 3D simulation (no Arduino connected)");

@@ -319,7 +319,10 @@ boolean motorsHandleControlEvent(String name, float value) {
   }
   if (name.startsWith("Power ")) {
     int i = int(name.substring(6)) - 2;
-    if (i >= 0 && i < MOTOR_COUNT) motorsApplyPower(i, value > 0.5);
+    if (i < 0 || i >= MOTOR_COUNT) return true;
+    boolean on = value > 0.5;
+    if (on && motorTorquePct[i] == 0) motorsSetTorqueBar(i, motorLastTorquePct[i]); // ON needs torque: back to its last value
+    motorsApplyPower(i, on);
     return true;
   }
   if (name.startsWith("Torque Level ")) {
@@ -327,6 +330,9 @@ boolean motorsHandleControlEvent(String name, float value) {
     if (i < 0 || i >= MOTOR_COUNT) return true;
     motorTorquePct[i] = constrain(round(value), 0, 100);
     if (motorTorqueBeforeAnim != null) motorTorqueBeforeAnim[i] = motorTorquePct[i];
+    // Torque and the ON/OFF switch are linked (2026-11-25): 0% = OFF, above 0 = ON.
+    if (motorTorquePct[i] == 0 && motorPowerOn(i)) { motorsSetPowerSwitch(i, false); return true; }
+    if (motorTorquePct[i] > 0 && !motorPowerOn(i)) { motorsSetPowerSwitch(i, true); return true; } // ON at this torque
     motorTorquePending[i] = true;   // sent (throttled) by motorsTick()
     return true;
   }
@@ -738,15 +744,66 @@ void motorsDrawLoadOverlay() {
 // sends it right away. Call on the drawing thread.
 void motorsSetTorque(int i, int pct) {
   pct = constrain(pct, 0, 100);
+  motorsSetTorqueBar(i, pct);
+  motorTorquePending[i] = false;
+  // Linked to the ON/OFF switch (2026-11-25): 0% = OFF, above 0 = ON.
+  if (pct == 0 && motorPowerOn(i)) { motorsSetPowerSwitch(i, false); return; }
+  if (pct > 0 && !motorPowerOn(i)) { motorsSetPowerSwitch(i, true); return; } // ON at this torque
+  if (rowActive(i + 2) && motorPowerOn(i)) sendSerialBytes(TORQUE_LIMIT_HEADER, hwId(i + 2), pct);
+}
+
+// Moves a row's torque bar (no event) and remembers it; nothing is sent.
+int[] motorLastTorquePct = null; // last torque above 0 per row (for switching back ON)
+void motorsSetTorqueBar(int i, int pct) {
+  if (motorLastTorquePct == null) { motorLastTorquePct = new int[MOTOR_COUNT]; java.util.Arrays.fill(motorLastTorquePct, 100); }
+  pct = constrain(pct, 0, 100);
   motorTorquePct[i] = pct;
+  if (pct > 0) motorLastTorquePct[i] = pct;
   Controller t = cp5.getController("Torque Level " + (i + 2));
   if (t != null) {
     t.setBroadcast(false);
     t.setValue(pct);
     t.setBroadcast(true);
   }
-  motorTorquePending[i] = false;
-  if (rowActive(i + 2) && motorPowerOn(i)) sendSerialBytes(TORQUE_LIMIT_HEADER, hwId(i + 2), pct);
+}
+
+// ---- ON / OFF colors (2026-11-25): green = ON, red = OFF, on the switch,
+// its ON/OFF text and the row's caption (Motor N / Torque N / Stiff N).
+// Grey = not fitted; red for every row in Manipulation mode (torque off).
+final color POWER_ON_COLOR = color(46, 204, 113);
+final color POWER_OFF_COLOR = color(235, 70, 70);
+
+color motorsRowStateColor(int i) {
+  if (!rowActive(i + 2)) return THEME_MUTED;
+  if (manipulationMode) return POWER_OFF_COLOR;
+  return motorPowerOn(i) ? POWER_ON_COLOR : POWER_OFF_COLOR;
+}
+
+// Called every frame (draw).
+void motorsSyncRowColors() {
+  if (motorLastTorquePct == null) { motorLastTorquePct = new int[MOTOR_COUNT]; java.util.Arrays.fill(motorLastTorquePct, 100); }
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    int id = i + 2;
+    if (motorTorquePct[i] > 0) motorLastTorquePct[i] = motorTorquePct[i];
+    // Safety net for the torque <-> switch link: a row at 0% is OFF, whatever set it.
+    if (motorTorquePct[i] == 0 && motorPowerOn(i) && !manipulationMode && frameCount > 1) {
+      println("Motor " + displayId(id) + ": torque 0% but switch ON - switching it OFF to match.");
+      motorsSetPowerSwitch(i, false);
+    }
+    color c = motorsRowStateColor(i);
+    for (String n : new String[] {"Motor ", "Torque Level ", "Stiffness "}) {
+      Controller ctl = cp5.getController(n + id);
+      if (ctl != null) ctl.setColorCaptionLabel(c);
+    }
+    Controller pw = cp5.getController("Power " + id);
+    if (pw != null) {
+      boolean on = motorPowerOn(i);
+      color sc = on ? POWER_ON_COLOR : POWER_OFF_COLOR;
+      pw.setColorBackground(themeShade(sc, -0.6)); // track
+      pw.setColorForeground(sc);                  // knob (ControlP5's SWITCH draws it with active/foreground)
+      pw.setColorActive(sc);
+    }
+  }
 }
 
 void motorsSetTorqueAll(int[] pct) {
@@ -756,17 +813,60 @@ void motorsSetTorqueAll(int[] pct) {
 // An animation's own torque plan: remembers the torque from before, so
 // motorsRestoreAnimationTorque() (called when the animation stops) puts it back.
 int[] motorTorqueBeforeAnim = null;
+boolean[] motorPowerBeforeAnim = null; // ON/OFF before the animation (an OFF row keeps its bar value)
 
 void motorsApplyAnimationTorque(int[] pct) {
-  if (motorTorqueBeforeAnim == null) motorTorqueBeforeAnim = motorTorquePct.clone();
+  if (motorTorqueBeforeAnim == null) {
+    motorTorqueBeforeAnim = motorTorquePct.clone();
+    motorPowerBeforeAnim = new boolean[MOTOR_COUNT];
+    for (int i = 0; i < MOTOR_COUNT; i++) motorPowerBeforeAnim[i] = motorPowerOn(i);
+  }
   motorsSetTorqueAll(pct);
 }
 
+// Stop: back to the torque AND the ON/OFF state from before the animation.
+// (Fix 2026-11-25: a row switched OFF by hand keeps its bar value, so
+// restoring the bars alone switched it back ON.)
 void motorsRestoreAnimationTorque() {
   if (motorTorqueBeforeAnim == null) return;
   int[] before = motorTorqueBeforeAnim;
+  boolean[] wasOn = motorPowerBeforeAnim;
   motorTorqueBeforeAnim = null;
-  motorsSetTorqueAll(before);
+  motorPowerBeforeAnim = null;
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    if (wasOn != null && !wasOn[i] && before[i] > 0) {
+      motorsSetTorqueBar(i, before[i]);                 // its old bar value...
+      motorTorquePending[i] = false;
+      if (motorPowerOn(i)) motorsSetPowerSwitch(i, false); // ...but OFF, as it was
+    } else {
+      motorsSetTorque(i, before[i]);
+    }
+  }
+}
+
+// Torque as the motors really are: a row switched OFF counts as 0.
+int[] motorsEffectiveTorque() {
+  int[] t = new int[MOTOR_COUNT];
+  for (int i = 0; i < MOTOR_COUNT; i++) t[i] = motorPowerOn(i) ? motorTorquePct[i] : 0;
+  return t;
+}
+
+// "\nJoints switched OFF by the user ..." for agent prompts, or "".
+String motorsUserOffNote() {
+  String off = "";
+  for (int i = 0; i < MOTOR_COUNT; i++) if (rowActive(i + 2) && !motorPowerOn(i)) off += (off.length() == 0 ? "" : ", ") + "joint " + (i + 1);
+  return off.length() == 0 ? "" : "\nSwitched OFF by the user (limp on purpose): " + off
+    + ". Keep them at torque 0 unless this object can't work with them limp; torque above 0 switches them back ON.";
+}
+
+// Motors (display ids) that are OFF now and that `plan` would switch back ON, e.g. "5, 6", or "".
+String motorsSwitchedOnBy(int[] plan) {
+  if (plan == null) return "";
+  String s = "";
+  for (int i = 0; i < MOTOR_COUNT && i < plan.length; i++) {
+    if (rowActive(i + 2) && !motorPowerOn(i) && plan[i] > 0) s += (s.length() == 0 ? "" : ", ") + displayId(i + 2);
+  }
+  return s;
 }
 
 String motorsTorqueList(int[] pct) {

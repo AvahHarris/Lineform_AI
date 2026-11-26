@@ -83,14 +83,15 @@ void filesSaveShapeButton() {
   int[] tq = new int[MOTOR_COUNT];
   JSONArray ang = new JSONArray(), small = new JSONArray(), large = new JSONArray();
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    // A shape still waiting for Create Shape (the ghost) is what gets saved.
-    cur[i] = stagedShape ? stagedShapeAngles[i] : cp5.getController("Motor " + (i + 2)).getValue();
+    // The CURRENT shape (the bars) is saved - never a ghost still waiting for Create Shape.
+    cur[i] = cp5.getController("Motor " + (i + 2)).getValue();
     float turn = cur[i] - 180;
     ang.append(round(cur[i] * 10) / 10.0);
     small.append(round((180 + turn * AI_SIZE_MIN_SCALE) * 10) / 10.0);
     large.append(round((180 + turn * AI_SIZE_MAX_SCALE) * 10) / 10.0);
     tq[i] = motorPowerOn(i) ? motorTorquePct[i] : 0; // OFF rows are saved as limp
   }
+  int[] stiffOut = hingeStiffnessLevel.clone(); // the motors' current stiffness
   JSONObject e = new JSONObject();
   e.setString("type", "shape");
   e.setString("name", name);
@@ -98,7 +99,7 @@ void filesSaveShapeButton() {
   e.setJSONArray("small", small);
   e.setJSONArray("large", large);
   e.setJSONArray("torque", libraryJsonInts(tq));
-  e.setJSONArray("stiffness", libraryJsonInts(hingeStiffnessLevel.clone()));
+  e.setJSONArray("stiffness", libraryJsonInts(stiffOut));
   filesPendingShape = e;
   selectOutput("Save shape as...", "filesShapeSaveSelected", filesDefault(SHAPES_DIR, name));
 }

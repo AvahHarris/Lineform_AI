@@ -196,6 +196,17 @@ float[] animRecordingAnglesAt(AnimRecording r, int elapsedMs) {
   return out;
 }
 
+// Torque of a recording at `elapsedMs` (nearest frame; the reset uses the last frame).
+int[] animRecordingTorqueAt(AnimRecording r, int elapsedMs) {
+  int n = r.frames.size();
+  int lastT = r.t.get(n - 1);
+  float e = elapsedMs % (lastT + max(1, r.resetMs));
+  if (e > lastT) return r.torque.get(n - 1);
+  int k = 0;
+  while (k < n - 1 && r.t.get(k + 1) <= e) k++;
+  return r.torque.get(k);
+}
+
 // Plays a loaded animation file's contents (call on the drawing thread).
 void animLibraryPlay(JSONObject e, String fileName) {
   String name = e.getString("name");
@@ -265,24 +276,4 @@ boolean animStageRecording(String name, AnimRecording rec, JSONObject source) {
   r.stiffnessGiven = true;
   stageAnimation(r, rec.torque.get(0));
   return true;
-}
-
-// A CHANGE to the loaded animation (adjust_loaded_animation, drawing thread):
-// instant if it is the one playing; if it is still waiting, the waiting one
-// is updated; otherwise (stopped) it waits for Create Shape like a new one.
-// Returns "playing", "waiting" or "ready".
-String animApplyRecordingChange(String name, AnimRecording rec, JSONObject source) {
-  AIAnimationResult r = new AIAnimationResult();
-  r.ok = true;
-  r.animationName = name;
-  r.recording = rec;
-  r.source = source;
-  r.jointStiffness = rec.stiffness.get(0);
-  r.stiffnessGiven = true;
-  boolean playingIt = aiAnimating && aiAnimRecording != null && aiAnimName.equals(name);
-  if (playingIt) { startAnimationNow(r, rec.torque.get(0)); return "playing"; }
-  boolean waitingIt = stagedAnim != null && stagedAnim.animationName.equals(name);
-  if (waitingIt) { stagedAnim = r; stagedAnimTorque = rec.torque.get(0); return "waiting"; }
-  stageAnimation(r, rec.torque.get(0));
-  return "ready";
 }
