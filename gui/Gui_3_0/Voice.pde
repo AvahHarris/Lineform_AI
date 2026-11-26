@@ -191,8 +191,10 @@ void voiceStop() {
   }
   if (voicePeak < 0.002) {
     voiceState = VOICE_IDLE;
-    noticeAdd("error", "Voice: the microphone gave only silence. Check Windows Settings > Privacy & "
-      + "security > Microphone > \"Let desktop apps access your microphone\", and the input device.");
+    noticeAdd("error", "Voice: the microphone gave only silence.\n"
+      + "WINDOWS: Settings > Privacy & security > Microphone > turn on \"Let desktop apps access your microphone\".\n"
+      + "MAC: System Settings > Privacy & Security > Microphone > turn on Processing (or Java), then restart the sketch.\n"
+      + "Also check the input device and its volume.");
     return;
   }
   final byte[] wav = voiceWav(voiceBuffer.toByteArray());

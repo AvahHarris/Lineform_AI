@@ -290,6 +290,7 @@ void motorsResetMotor(int dxlId) {
     t.setBroadcast(true);
   }
   motorTorquePct[i] = 100;
+  motorOffByHand[i] = false;
   Toggle pw = cp5.get(Toggle.class, "Power " + dxlId);
   if (pw != null) {
     pw.setBroadcast(false);
@@ -322,7 +323,12 @@ boolean motorsHandleControlEvent(String name, float value) {
     if (i < 0 || i >= MOTOR_COUNT) return true;
     boolean on = value > 0.5;
     if (on && motorTorquePct[i] == 0) motorsSetTorqueBar(i, motorLastTorquePct[i]); // ON needs torque: back to its last value
-    motorsApplyPower(i, on);
+    motorsApplyPower(i, on);   // OFF also puts the torque bar at 0
+    motorOffByHand[i] = !on;   // Create Shape switches rows you turned OFF here back ON
+    if (motorTorqueBeforeAnim != null) { // during an animation: Stop keeps your choice
+      motorTorqueBeforeAnim[i] = motorTorquePct[i];
+      if (motorPowerBeforeAnim != null) motorPowerBeforeAnim[i] = on;
+    }
     return true;
   }
   if (name.startsWith("Torque Level ")) {
@@ -779,12 +785,35 @@ color motorsRowStateColor(int i) {
   return motorPowerOn(i) ? POWER_ON_COLOR : POWER_OFF_COLOR;
 }
 
+int[] motorPrevBarPct = new int[MOTOR_COUNT]; // torque bar value last frame (motorsSyncRowColors)
+boolean[] motorOffByHand = new boolean[MOTOR_COUNT]; // switched OFF with its switch (Create Shape turns these back ON)
+
 // Called every frame (draw).
 void motorsSyncRowColors() {
   if (motorLastTorquePct == null) { motorLastTorquePct = new int[MOTOR_COUNT]; java.util.Arrays.fill(motorLastTorquePct, 100); }
   for (int i = 0; i < MOTOR_COUNT; i++) {
     int id = i + 2;
     if (motorTorquePct[i] > 0) motorLastTorquePct[i] = motorTorquePct[i];
+    // Backup for the torque <-> switch link: YOU are dragging a row's torque
+    // bar up from 0 while it is OFF -> switch it ON at that torque, even if
+    // the slider's own event didn't do it.
+    Controller tb = cp5.getController("Torque Level " + id);
+    if (tb != null) {
+      int barPct = constrain(round(tb.getValue()), 0, 100);
+      if (tb.isMousePressed() && motorPrevBarPct[i] == 0 && barPct > 0 && !motorPowerOn(i)
+          && rowActive(id) && !manipulationMode) {
+        println("Motor " + displayId(id) + ": torque bar raised from 0 while OFF - switching it ON at " + barPct + "%.");
+        motorTorquePct[i] = barPct;
+        if (motorTorqueBeforeAnim != null) motorTorqueBeforeAnim[i] = barPct;
+        motorsSetPowerSwitch(i, true);
+      }
+      motorPrevBarPct[i] = barPct;
+    }
+    // ...and the other way round: a row that is OFF shows torque 0, whatever switched it off.
+    if (!motorPowerOn(i) && motorTorquePct[i] > 0 && !manipulationMode && frameCount > 1) {
+      motorsSetTorqueBar(i, 0);
+      motorPrevBarPct[i] = 0;
+    }
     // Safety net for the torque <-> switch link: a row at 0% is OFF, whatever set it.
     if (motorTorquePct[i] == 0 && motorPowerOn(i) && !manipulationMode && frameCount > 1) {
       println("Motor " + displayId(id) + ": torque 0% but switch ON - switching it OFF to match.");
@@ -813,7 +842,7 @@ void motorsSetTorqueAll(int[] pct) {
 // An animation's own torque plan: remembers the torque from before, so
 // motorsRestoreAnimationTorque() (called when the animation stops) puts it back.
 int[] motorTorqueBeforeAnim = null;
-boolean[] motorPowerBeforeAnim = null; // ON/OFF before the animation (an OFF row keeps its bar value)
+boolean[] motorPowerBeforeAnim = null; // ON/OFF before the animation
 
 void motorsApplyAnimationTorque(int[] pct) {
   if (motorTorqueBeforeAnim == null) {
@@ -834,13 +863,8 @@ void motorsRestoreAnimationTorque() {
   motorTorqueBeforeAnim = null;
   motorPowerBeforeAnim = null;
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    if (wasOn != null && !wasOn[i] && before[i] > 0) {
-      motorsSetTorqueBar(i, before[i]);                 // its old bar value...
-      motorTorquePending[i] = false;
-      if (motorPowerOn(i)) motorsSetPowerSwitch(i, false); // ...but OFF, as it was
-    } else {
-      motorsSetTorque(i, before[i]);
-    }
+    if (wasOn != null && !wasOn[i]) motorsSetTorque(i, 0); // OFF before -> OFF again (bar 0)
+    else motorsSetTorque(i, before[i]);
   }
 }
 
@@ -991,9 +1015,12 @@ void motorsApplyPower(int i, boolean on) {
     updatingShapeControls = false;
     motorsSendOneGoal(i, here);
     sendSerialBytes(TORQUE_LIMIT_HEADER, hwId(rowId), motorTorquePct[i]);
+    motorOffByHand[i] = false;
   } else {
     sendSerialBytes(254, hwId(rowId), 0);
   }
+  // OFF = torque 0 on the bar too (its last value above 0 is remembered for ON).
+  if (!on) motorsSetTorqueBar(i, 0);
   println("Motor " + displayId(rowId) + " torque " + (on ? "ON" : "OFF"));
 }
 

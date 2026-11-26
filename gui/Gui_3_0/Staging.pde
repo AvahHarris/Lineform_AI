@@ -334,13 +334,13 @@ int[] stagedPreviewTorque() {
   return null;
 }
 
-// Create Shape: motors switched OFF by hand (bar above 0) go back ON and hold
-// (as in the backup GUI). Rows at 0%, or planned at torque 0 by the waiting
-// item, stay OFF.
+// Create Shape: motors you switched OFF with their switch go back ON at their
+// last torque and hold (as in the backup GUI). Rows set to 0% torque (bar,
+// agent, file), or planned at torque 0 by the waiting item, stay OFF.
 void createShapeSwitchOn(int[] plan) {
   for (int i = 0; i < MOTOR_COUNT; i++) {
     if (plan != null && i < plan.length && plan[i] == 0) continue;
-    if (!motorPowerOn(i) && motorTorquePct[i] > 0) motorsSetPowerSwitch(i, true);
+    if (!motorPowerOn(i) && motorOffByHand[i]) motorsSetTorque(i, motorLastTorquePct[i]); // ON at its last torque
   }
 }
 
@@ -362,20 +362,20 @@ boolean[] stagedPreviewFree() {
   boolean[] free = new boolean[MOTOR_COUNT];
   for (int i = 0; i < MOTOR_COUNT; i++) {
     if (i >= ACTIVE_MOTORS) continue;
-    free[i] = (tq != null) ? tq[i] == 0 : motorTorquePct[i] == 0; // OFF by hand with bar > 0 -> switched ON by Create Shape
+    free[i] = (tq != null) ? tq[i] == 0 : (motorTorquePct[i] == 0 && !motorOffByHand[i]); // switched OFF by hand -> back ON on Create Shape
   }
   return free;
 }
 
 // Which joints are switched OFF now but will be ON when the waiting item
 // starts: its torque plan gives them torque above 0, or (no plan) Create
-// Shape switches them back ON because their bar is above 0.
+// Shape switches them back ON because you switched them OFF with the switch.
 boolean[] stagedPreviewTurnsOn() {
   int[] tq = stagedPreviewTorque();
   boolean[] on = new boolean[MOTOR_COUNT];
   for (int i = 0; i < MOTOR_COUNT; i++) {
-    int t = (tq != null && i < tq.length) ? tq[i] : motorTorquePct[i];
-    on[i] = rowActive(i + 2) && !motorPowerOn(i) && t > 0;
+    boolean willBeOn = (tq != null && i < tq.length) ? tq[i] > 0 : motorOffByHand[i];
+    on[i] = rowActive(i + 2) && !motorPowerOn(i) && willBeOn;
   }
   return on;
 }
